@@ -1,0 +1,87 @@
+// Package try provides a generic, context-aware retry loop with exponential
+// backoff and pluggable jitter strategies.
+//
+// # Basic usage
+//
+//	val, err := try.Do(ctx, func(ctx context.Context) (string, error) {
+//	    return callExternalAPI(ctx)
+//	})
+//
+// Do retries up to 5 times by default, waiting between attempts using
+// exponential backoff capped at 30 seconds.
+//
+// # Options
+//
+// Behaviour is configured through functional options:
+//
+//	try.Do(ctx, fn,
+//	    try.WithAttempts(10),
+//	    try.WithInitialDelay(500*time.Millisecond),
+//	    try.WithMaxDelay(2*time.Minute),
+//	    try.WithJitter(try.EqualJitter),
+//	    try.WithRetryIf(isTransient),
+//	    try.WithOnRetry(func(info try.RetryInfo) {
+//	        slog.Warn("retrying",
+//	            "attempt", info.Attempt,
+//	            "delay",   info.Delay,
+//	            "error",   info.Err,
+//	        )
+//	    }),
+//	)
+//
+// [WithMaxDelay] overrides the default 30s cap on any single wait, which is
+// useful when integrating with slow services or enforcing strict SLAs.
+//
+// [WithOnRetry] registers a callback invoked before each wait, receiving a
+// [RetryInfo] with the 1-based attempt number, the error, and the delay about
+// to be taken. The callback is not called on the final attempt since no retry
+// will follow. Use it for structured logging, metrics, or tracing.
+//
+// # Default retry behaviour
+//
+// By default Do retries on every error except [context.Canceled],
+// [context.DeadlineExceeded], and errors wrapped with [Permanent]. This means
+// validation errors, auth failures, and malformed-payload errors are retried
+// unless explicitly excluded. For production use, always supply a [WithRetryIf]
+// predicate to restrict retries to genuinely transient failures:
+//
+//	try.WithRetryIf(func(err error) bool {
+//	    var httpErr *HTTPError
+//	    if errors.As(err, &httpErr) {
+//	        return httpErr.StatusCode >= 500 // never retry 4xx
+//	    }
+//	    return true
+//	})
+//
+// # Stopping immediately
+//
+// Wrap an error with [Permanent] to stop the loop without exhausting all
+// attempts. The underlying error is unwrapped, so [errors.Is] and [errors.As]
+// work normally on the value returned by Do:
+//
+//	return 0, try.Permanent(err)
+//
+// # Retry-After support
+//
+// If an error implements [RetryAfterer], its RetryAfter duration is used
+// instead of the computed backoff, making it straightforward to honour
+// HTTP 429 Retry-After headers:
+//
+//	func (e *RateLimitError) RetryAfter() time.Duration { return e.RetryIn }
+//
+// # Jitter strategies
+//
+// Two strategies are available via [WithJitter]:
+//
+//   - [FullJitter] (default): delay is drawn uniformly from [1ms, cap).
+//     Maximally spreads concurrent retriers; recommended for most cases.
+//
+//   - [EqualJitter]: delay is cap/2 + rand[0, cap/2).
+//     Guarantees at least half the exponential backoff; useful when a
+//     minimum wait time is required.
+//
+// # Testing
+//
+// Inject a custom [Clock] via [WithClock] to control time in unit tests
+// without real sleeps.
+package try

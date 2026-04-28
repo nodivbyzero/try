@@ -1,0 +1,209 @@
+package try
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"time"
+)
+
+// RetryAfterer allows errors to specify a custom wait duration.
+type RetryAfterer interface {
+	RetryAfter() time.Duration
+}
+
+// Clock interface allows for "time-travel" in unit tests.
+type Clock interface {
+	After(d time.Duration) <-chan time.Time
+	Now() time.Time
+}
+
+type realClock struct{}
+
+func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+func (realClock) Now() time.Time                         { return time.Now() }
+
+// JitterStrategy controls how randomness is applied to the backoff delay.
+type JitterStrategy int
+
+const (
+	// FullJitter draws the delay uniformly from [1ms, cap), minimising
+	// correlated retries at the cost of potentially very short waits.
+	// This is the default and is recommended for most use cases.
+	FullJitter JitterStrategy = iota
+
+	// EqualJitter uses cap/2 + rand[0, cap/2), guaranteeing at least half
+	// the exponential backoff while still spreading load across retriers.
+	EqualJitter
+)
+
+// RetryInfo carries context about a failed attempt, passed to the OnRetry callback.
+type RetryInfo struct {
+	Attempt   int           // 1-based attempt number that just failed
+	Err       error         // error returned by the attempt
+	Delay     time.Duration // how long Do will wait before the next attempt
+}
+
+// Config holds the internal state for the retry operation.
+type Config struct {
+	MaxAttempts  int
+	InitialDelay time.Duration
+	MaxDelay     time.Duration
+	Clock        Clock
+	Predicate    func(error) bool
+	Jitter       JitterStrategy
+	// OnRetry is called before each wait. It is not called on the final
+	// attempt since no retry will occur.
+	OnRetry func(RetryInfo)
+}
+
+// Option defines functional configuration for the retry.
+type Option func(*Config)
+
+// Sane Defaults
+func defaultConfig() *Config {
+	return &Config{
+		MaxAttempts: 5,
+		InitialDelay: 200 * time.Millisecond,
+		MaxDelay:    30 * time.Second,
+		Clock:       realClock{},
+	}
+}
+
+// Do is the generic entry point for retrying a function.
+func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opts ...Option) (T, error) {
+	cfg := defaultConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	var zero T
+	var lastErr error
+	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
+		val, err := fn(ctx)
+		if err == nil {
+			return val, nil
+		}
+
+		lastErr = err
+
+		// Bug fix #1: return zero value (not partial val) on non-retryable errors.
+		if !shouldRetry(ctx, cfg, err) {
+			return zero, err
+		}
+
+		// Don't sleep after the last attempt — there's nothing to wait for.
+		// Bug fix #2: skip delay calculation on the final attempt.
+		if attempt == cfg.MaxAttempts {
+			break
+		}
+
+		// Calculate backoff
+		delay := calculateNextDelay(cfg, attempt, err)
+
+		// Fire the OnRetry callback so callers can log or record metrics.
+		// Not called on the final attempt since no retry will follow.
+		if cfg.OnRetry != nil {
+			cfg.OnRetry(RetryInfo{Attempt: attempt, Err: err, Delay: delay})
+		}
+
+		// Wait for either the delay or context cancellation.
+		// Wrap ctx.Err() with the last operation error so callers can inspect
+		// both: what the context did (Canceled/DeadlineExceeded) and what the
+		// function last returned. errors.Is/As on the wrapped error still
+		// surfaces ctx.Err() correctly via Unwrap.
+		select {
+		case <-ctx.Done():
+			return zero, fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
+		case <-cfg.Clock.After(delay):
+			continue
+		}
+	}
+
+	return zero, lastErr
+}
+
+// Permanent wraps an error to signal the loop should stop immediately.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentError{err}
+}
+
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var p *permanentError
+	if errors.As(err, &p) {
+		return false
+	}
+	if cfg.Predicate != nil {
+		return cfg.Predicate(err)
+	}
+	return true
+}
+
+func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
+	// 1. Check for Retry-After override
+	if ra, ok := err.(RetryAfterer); ok {
+		d := ra.RetryAfter()
+		if d > cfg.MaxDelay {
+			return cfg.MaxDelay
+		}
+		return d
+	}
+
+	// 2. Compute exponential cap: min(MaxDelay, InitialDelay * 2^(attempt-1))
+	//
+	// Use iterative doubling instead of a bit-shift multiply so that overflow
+	// is caught explicitly at each step. A single multiply like
+	// InitialDelay * (1 << shift) can silently wrap to a negative value when
+	// InitialDelay is large, and relying on cap <= 0 to detect that is subtle.
+	cap := cfg.InitialDelay
+	for i := 1; i < attempt; i++ {
+		cap *= 2
+		if cap >= cfg.MaxDelay || cap < 0 { // cap < 0 means int64 overflowed
+			cap = cfg.MaxDelay
+			break
+		}
+	}
+	if cap > cfg.MaxDelay {
+		cap = cfg.MaxDelay
+	}
+
+	// 3. Enforce the 1ms floor on the cap *before* passing it to Int64N.
+	// rand.Int64N(n) panics if n <= 0, which can happen when InitialDelay is
+	// very small (e.g. 1ns) and the computed cap rounds down to zero or below
+	// the minimum meaningful range. Clamping here is safe: if cap < 1ms the
+	// result would have been floored to 1ms anyway.
+	if cap < time.Millisecond {
+		cap = time.Millisecond
+	}
+
+	// 4. Apply jitter strategy.
+	var d time.Duration
+	switch cfg.Jitter {
+	case EqualJitter:
+		// Equal Jitter: cap/2 + rand[0, cap/2)
+		// Guarantees at least half the exponential backoff, reducing the chance
+		// of very short delays while still spreading retriers over time.
+		// After the floor above, cap >= 1ms so half >= 500µs > 0 — no panic risk.
+		half := cap / 2
+		d = half + time.Duration(rand.Int64N(int64(half)))
+	default: // FullJitter
+		// Full Jitter: rand[0, cap)
+		// Minimises correlated retries at the cost of potentially short waits.
+		// cap >= 1ms after the floor above — no panic risk.
+		d = time.Duration(rand.Int64N(int64(cap)))
+	}
+
+	return d
+}
