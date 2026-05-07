@@ -69,6 +69,10 @@ type Config struct {
 	// attempt error and returns them joined via errors.Join so that
 	// errors.Is / errors.As can inspect the full history.
 	AllErrors bool
+	// DelayFunc overrides the built-in backoff algorithm entirely.
+	// When set, it is called instead of calculateNextDelay. RetryAfterer
+	// on the error is still respected before DelayFunc is consulted.
+	DelayFunc func(attempt int, err error) time.Duration
 }
 
 // AttemptErrors is the joined error type returned when WithAllErrors is set.
@@ -257,7 +261,7 @@ func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
 }
 
 func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
-	// 1. Check for Retry-After override
+	// 1. Check for Retry-After override — takes precedence over everything.
 	if ra, ok := err.(RetryAfterer); ok {
 		d := ra.RetryAfter()
 		if d > cfg.MaxDelay {
@@ -266,7 +270,17 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 		return d
 	}
 
-	// 2. Compute exponential cap: min(MaxDelay, InitialDelay * 2^(attempt-1))
+	// 2. Delegate to the custom delay function if one is configured.
+	// The caller is responsible for capping and jitter within their function.
+	if cfg.DelayFunc != nil {
+		d := cfg.DelayFunc(attempt, err)
+		if d < 0 {
+			d = 0
+		}
+		return d
+	}
+
+	// 3. Compute exponential cap: min(MaxDelay, InitialDelay * 2^(attempt-1))
 	//
 	// Use iterative doubling instead of a bit-shift multiply so that overflow
 	// is caught explicitly at each step. A single multiply like
@@ -284,7 +298,7 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 		cap = cfg.MaxDelay
 	}
 
-	// 3. Enforce the 1ms floor on the cap *before* passing it to Int64N.
+	// 4. Enforce the 1ms floor on the cap *before* passing it to Int64N.
 	// rand.Int64N(n) panics if n <= 0, which can happen when InitialDelay is
 	// very small (e.g. 1ns) and the computed cap rounds down to zero or below
 	// the minimum meaningful range. Clamping here is safe: if cap < 1ms the
@@ -293,7 +307,7 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 		cap = time.Millisecond
 	}
 
-	// 4. Apply jitter strategy.
+	// 5. Apply jitter strategy.
 	var d time.Duration
 	switch cfg.Jitter {
 	case EqualJitter:

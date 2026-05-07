@@ -686,3 +686,97 @@ func TestDo_WithoutAllErrors_ReturnsLastOnly(t *testing.T) {
 		t.Error("expected no *AttemptErrors without WithAllErrors")
 	}
 }
+
+func TestDo_WithDelayFunc_FixedDelay(t *testing.T) {
+	// WithDelayFunc replaces the backoff algorithm entirely.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	const fixed = 42 * time.Millisecond
+	var observedDelays []time.Duration
+
+	attempt := 0
+	_, _ = Do(ctx, func(ctx context.Context) (int, error) {
+		attempt++
+		if attempt < 4 {
+			return 0, errors.New("fail")
+		}
+		return attempt, nil
+	},
+		WithAttempts(5),
+		WithDelayFunc(func(_ int, _ error) time.Duration { return fixed }),
+		WithOnRetry(func(info RetryInfo) { observedDelays = append(observedDelays, info.Delay) }),
+		WithClock(clk),
+	)
+
+	for i, d := range observedDelays {
+		if d != fixed {
+			t.Errorf("delay[%d] = %v, want %v", i, d, fixed)
+		}
+	}
+}
+
+func TestDo_WithDelayFunc_LinearBackoff(t *testing.T) {
+	// DelayFunc receives the correct 1-based attempt number.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	var observedDelays []time.Duration
+
+	_, _ = Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("fail")
+	},
+		WithAttempts(4),
+		WithDelayFunc(func(attempt int, _ error) time.Duration {
+			return time.Duration(attempt) * 10 * time.Millisecond // 10ms, 20ms, 30ms
+		}),
+		WithOnRetry(func(info RetryInfo) { observedDelays = append(observedDelays, info.Delay) }),
+		WithClock(clk),
+	)
+
+	expected := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 30 * time.Millisecond}
+	if len(observedDelays) != len(expected) {
+		t.Fatalf("expected %d delays, got %d", len(expected), len(observedDelays))
+	}
+	for i, want := range expected {
+		if observedDelays[i] != want {
+			t.Errorf("delay[%d] = %v, want %v", i, observedDelays[i], want)
+		}
+	}
+}
+
+type retryAfterFixedErr struct{ d time.Duration }
+
+func (e retryAfterFixedErr) Error() string             { return "retry after fixed" }
+func (e retryAfterFixedErr) RetryAfter() time.Duration { return e.d }
+
+func TestDo_WithDelayFunc_RetryAftererStillTakesPrecedence(t *testing.T) {
+	// RetryAfterer on the error overrides DelayFunc.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 5)}
+	for i := 0; i < 5; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	const raDelay = 99 * time.Millisecond
+	var observedDelay time.Duration
+
+	_, _ = Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, retryAfterFixedErr{d: raDelay}
+	},
+		WithAttempts(2),
+		WithDelayFunc(func(_ int, _ error) time.Duration { return 1 * time.Millisecond }),
+		WithOnRetry(func(info RetryInfo) { observedDelay = info.Delay }),
+		WithClock(clk),
+	)
+
+	if observedDelay != raDelay {
+		t.Errorf("expected RetryAfterer delay %v, got %v", raDelay, observedDelay)
+	}
+}

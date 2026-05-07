@@ -71,3 +71,23 @@ func WithTimeout(d time.Duration) Option {
 func WithAllErrors() Option {
 	return func(c *Config) { c.AllErrors = true }
 }
+
+// WithDelayFunc replaces the built-in exponential backoff algorithm with a
+// custom function. fn receives the 1-based attempt number that just failed
+// and the error it returned, and returns the duration to wait before the
+// next attempt. RetryAfterer on the error still takes precedence over fn.
+//
+// Common uses: fixed delay, linear backoff, or domain-specific schedules.
+//
+//	// Fixed 500ms delay regardless of attempt number:
+//	try.WithDelayFunc(func(attempt int, err error) time.Duration {
+//	    return 500 * time.Millisecond
+//	})
+//
+//	// Linear backoff: 1s, 2s, 3s, ...
+//	try.WithDelayFunc(func(attempt int, err error) time.Duration {
+//	    return time.Duration(attempt) * time.Second
+//	})
+func WithDelayFunc(fn func(attempt int, err error) time.Duration) Option {
+	return func(c *Config) { c.DelayFunc = fn }
+}

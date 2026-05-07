@@ -64,6 +64,32 @@
 //
 //	try.Do(ctx, fn, try.WithInfiniteRetry())
 //
+// # Custom delay function
+//
+// [WithDelayFunc] replaces the built-in exponential backoff entirely with a
+// caller-supplied function. It receives the 1-based attempt number that just
+// failed and the error it returned:
+//
+//	// Fixed 500ms delay:
+//	try.WithDelayFunc(func(attempt int, err error) time.Duration {
+//	    return 500 * time.Millisecond
+//	})
+//
+//	// Linear backoff: 1s, 2s, 3s, …
+//	try.WithDelayFunc(func(attempt int, err error) time.Duration {
+//	    return time.Duration(attempt) * time.Second
+//	})
+//
+//	// Error-dependent delay:
+//	try.WithDelayFunc(func(attempt int, err error) time.Duration {
+//	    if errors.Is(err, ErrThrottled) {
+//	        return 10 * time.Second
+//	    }
+//	    return time.Duration(attempt) * 200 * time.Millisecond
+//	})
+//
+// [RetryAfterer] on the error still takes precedence over [WithDelayFunc].
+//
 // # Error aggregation
 //
 // By default Do returns only the last attempt's error. Use [WithAllErrors] to
