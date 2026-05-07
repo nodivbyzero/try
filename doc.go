@@ -72,6 +72,13 @@
 //
 //	return 0, try.Permanent(err)
 //
+// Use [IsPermanent] to inspect whether an error came from a permanent failure
+// without unwrapping it manually:
+//
+//	if try.IsPermanent(err) {
+//	    // do not retry at a higher level
+//	}
+//
 // # Retry-After support
 //
 // If an error implements [RetryAfterer], its RetryAfter duration is used

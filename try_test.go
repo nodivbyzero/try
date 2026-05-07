@@ -3,6 +3,7 @@ package try
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -355,5 +356,24 @@ func TestDo_InfiniteRetry_StopsOnPermanent(t *testing.T) {
 	}
 	if err == nil || err.Error() != "fatal" {
 		t.Errorf("expected 'fatal' error, got %v", err)
+	}
+}
+
+func TestIsPermanent(t *testing.T) {
+	base := errors.New("fatal")
+
+	if IsPermanent(nil) {
+		t.Error("IsPermanent(nil) should be false")
+	}
+	if IsPermanent(base) {
+		t.Error("IsPermanent(unwrapped err) should be false")
+	}
+	if !IsPermanent(Permanent(base)) {
+		t.Error("IsPermanent(Permanent(err)) should be true")
+	}
+	// Must work through an additional wrapping layer.
+	wrapped := fmt.Errorf("outer: %w", Permanent(base))
+	if !IsPermanent(wrapped) {
+		t.Error("IsPermanent should work through fmt.Errorf wrapping")
 	}
 }

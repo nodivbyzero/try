@@ -141,6 +141,13 @@ type permanentError struct{ err error }
 func (e *permanentError) Error() string { return e.err.Error() }
 func (e *permanentError) Unwrap() error { return e.err }
 
+// IsPermanent reports whether err was wrapped with Permanent.
+// Useful for inspecting errors after Do returns, without unwrapping manually.
+func IsPermanent(err error) bool {
+	var p *permanentError
+	return errors.As(err, &p)
+}
+
 func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false

@@ -7,6 +7,7 @@ A small, generic Go library for retrying fallible operations with exponential ba
 - **Generic** — works with any return type via `Do[T]`
 - **Exponential backoff** with pluggable jitter — Full Jitter (default) or Equal Jitter
 - **`Permanent` errors** — stop retrying immediately for non-recoverable failures
+- **`IsPermanent(err)`** — inspect whether an error originated from a permanent failure
 - **`RetryAfterer` interface** — errors can specify their own wait duration (e.g. HTTP 429)
 - **Custom predicates** — decide per-error whether to retry
 - **Testable** — injectable `Clock` interface for time-travel in unit tests
@@ -104,6 +105,18 @@ val, err := try.Do(ctx, func(ctx context.Context) (*User, error) {
 ```
 
 The underlying error is unwrapped, so `errors.Is` / `errors.As` work normally on the returned error.
+
+Use `IsPermanent` to check whether an error came from a permanent failure at any call site — without unwrapping manually:
+
+```go
+val, err := try.Do(ctx, fn)
+if try.IsPermanent(err) {
+    // non-recoverable — do not retry at a higher level
+    return err
+}
+```
+
+`IsPermanent` works through additional wrapping layers, so `fmt.Errorf("%w", permanentErr)` is correctly detected.
 
 ## Respecting `Retry-After`: `RetryAfterer`
 
