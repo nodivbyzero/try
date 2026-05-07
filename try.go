@@ -56,6 +56,10 @@ type Config struct {
 	// OnRetry is called before each wait. It is not called on the final
 	// attempt since no retry will occur.
 	OnRetry func(RetryInfo)
+	// ErrorBudgets holds per-error attempt limits set by WithAttemptsForError.
+	// Each entry is checked independently; the first exhausted budget stops retries
+	// for that error, and counts against the global MaxAttempts budget too.
+	ErrorBudgets []errorBudget
 }
 
 // Option defines functional configuration for the retry.
@@ -148,6 +152,23 @@ func IsPermanent(err error) bool {
 	return errors.As(err, &p)
 }
 
+// errorBudget pairs a target error with its remaining retry allowance.
+type errorBudget struct {
+	target    error
+	remaining int
+}
+
+// matchBudget returns a pointer to the first budget whose target matches err
+// via errors.Is, or nil if no budget applies.
+func matchBudget(budgets []errorBudget, err error) *errorBudget {
+	for i := range budgets {
+		if errors.Is(err, budgets[i].target) {
+			return &budgets[i]
+		}
+	}
+	return nil
+}
+
 func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -155,6 +176,12 @@ func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
 	var p *permanentError
 	if errors.As(err, &p) {
 		return false
+	}
+	if b := matchBudget(cfg.ErrorBudgets, err); b != nil {
+		if b.remaining <= 0 {
+			return false
+		}
+		b.remaining--
 	}
 	if cfg.Predicate != nil {
 		return cfg.Predicate(err)

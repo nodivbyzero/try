@@ -40,3 +40,17 @@ func WithMaxDelay(d time.Duration) Option {
 func WithInfiniteRetry() Option {
 	return func(c *Config) { c.MaxAttempts = 0 }
 }
+
+// WithAttemptsForError sets a maximum retry count for a specific error value.
+// When err is returned and its per-error budget is exhausted, the loop stops
+// immediately — even if the global MaxAttempts budget has remaining attempts.
+// Multiple calls accumulate independent budgets for different error values.
+// Matching uses errors.Is, so sentinel errors and wrapped errors both work.
+func WithAttemptsForError(n int, target error) Option {
+	return func(c *Config) {
+		c.ErrorBudgets = append(c.ErrorBudgets, errorBudget{
+			target:    target,
+			remaining: n - 1, // n attempts means n-1 retries after the first call
+		})
+	}
+}

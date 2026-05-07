@@ -64,6 +64,21 @@
 //
 //	try.Do(ctx, fn, try.WithInfiniteRetry())
 //
+// # Per-error attempt budgets
+//
+// [WithAttemptsForError] sets an independent retry cap for a specific error.
+// When that error is returned and its budget is exhausted, the loop stops
+// immediately — even if the global [WithAttempts] budget has remaining
+// attempts. Multiple calls accumulate independent budgets:
+//
+//	try.Do(ctx, fn,
+//	    try.WithAttempts(10),
+//	    try.WithAttemptsForError(2, ErrRateLimit),   // stop after 2 rate-limit hits
+//	    try.WithAttemptsForError(3, ErrUnavailable), // stop after 3 unavailable hits
+//	)
+//
+// Matching uses [errors.Is], so sentinel errors and wrapped errors both work.
+//
 // # Stopping immediately
 //
 // Wrap an error with [Permanent] to stop the loop without exhausting all

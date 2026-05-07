@@ -8,6 +8,7 @@ A small, generic Go library for retrying fallible operations with exponential ba
 - **Exponential backoff** with pluggable jitter — Full Jitter (default) or Equal Jitter
 - **`Permanent` errors** — stop retrying immediately for non-recoverable failures
 - **`IsPermanent(err)`** — inspect whether an error originated from a permanent failure
+- **Per-error budgets** — `WithAttemptsForError(n, err)` caps retries for a specific error independently of the global limit
 - **`RetryAfterer` interface** — errors can specify their own wait duration (e.g. HTTP 429)
 - **Custom predicates** — decide per-error whether to retry
 - **Testable** — injectable `Clock` interface for time-travel in unit tests
@@ -68,6 +69,7 @@ Each option is a functional setter for a field on `Config`:
 | `WithMaxDelay(d time.Duration)` | `MaxDelay` | `30s` | Upper bound on any single wait regardless of backoff growth |
 | `WithJitter(s JitterStrategy)` | `Jitter` | `FullJitter` | Jitter strategy: `FullJitter` or `EqualJitter` |
 | `WithRetryIf(fn func(error) bool)` | `Predicate` | retry all | Return `false` to stop retrying for a given error |
+| `WithAttemptsForError(n int, err error)` | `ErrorBudgets` | — | Cap retries for a specific error; multiple calls accumulate |
 | `WithOnRetry(fn func(RetryInfo))` | `OnRetry` | nil | Callback fired before each wait — use for logging or metrics |
 | `WithClock(clk Clock)` | `Clock` | `time.After` | Injectable clock for time-travel in tests |
 
@@ -144,6 +146,31 @@ The exponential cap for attempt `n` is `min(MaxDelay, InitialDelay × 2^(n−1))
 
 Both strategies enforce a 1ms minimum floor. The Full Jitter approach is recommended by [AWS](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for avoiding thundering herd; Equal Jitter is preferable when a minimum wait time matters.
 
+## Per-Error Attempt Budgets
+
+`WithAttemptsForError` sets an independent retry cap for a specific error value.
+When that error is returned and its budget is exhausted, the loop stops immediately
+— even if the global `WithAttempts` budget has remaining attempts.
+
+```go
+var ErrRateLimit = errors.New("rate limited")
+var ErrUnavailable = errors.New("service unavailable")
+
+val, err := try.Do(ctx, fn,
+    try.WithAttempts(10),
+    try.WithAttemptsForError(2, ErrRateLimit),    // stop after 2 rate-limit hits
+    try.WithAttemptsForError(3, ErrUnavailable),  // stop after 3 unavailable hits
+)
+```
+
+Multiple `WithAttemptsForError` calls accumulate independent budgets. Matching
+uses `errors.Is`, so wrapped errors are detected correctly:
+
+```go
+// This will match ErrRateLimit even through fmt.Errorf wrapping.
+return 0, fmt.Errorf("upstream: %w", ErrRateLimit)
+```
+
 ## Best Practice: Filtering Retryable Errors
 
 Because `Do` retries all errors by default, use `WithRetryIf` to restrict retries
@@ -211,29 +238,6 @@ go func() {
 clk.ch <- time.Now() // advance past first wait instantly
 ```
 
-## Comparison
-
-| Capability | `avast/retry-go` | `nodivbyzero/try` |
-|---|---|---|
-| Exponential backoff | Yes (`BackOffDelay`) | Yes |
-| Jitter | Yes (`RandomDelay`, combinable) | Yes (`FullJitter`, `EqualJitter`) |
-| Context cancellation | Yes | Yes (wraps last error) |
-| Retry predicates | Yes (`RetryIf`, `AttemptsForError`) | Yes (`WithRetryIf`) |
-| Error aggregation | Yes (all errors wrapped) | No (last error only) |
-| Generic return values | Yes (`DoWithData[T]`) | Yes (`Do[T]`) — unified API |
-| Hooks / callbacks | `OnRetry(n uint, err error)` | `OnRetry(RetryInfo)` with delay |
-| Infinite retry | Yes (`Attempts(0)`) | Yes (`WithInfiniteRetry()`) |
-| Custom delay function | Yes (`DelayTypeFunc`) | No |
-| `RetryAfterer` interface | No | Yes |
-| Testable clock | No | Yes (`WithClock`) |
-| Zero dependencies | Yes | Yes |
-| API style | `retry.New(opts...).Do(fn)` | `try.Do(ctx, fn, opts...)` |
-
-**When to use `avast/retry-go`:** you need error aggregation across all attempts,
-custom delay functions, or per-error attempt budgets (`AttemptsForError`).
-
-**When to use `nodivbyzero/try`:** you want a context-first generic API, need to honour
-`Retry-After` headers from error values, or want a testable clock for unit tests without real sleeps.
 
 ## License
 

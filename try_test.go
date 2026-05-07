@@ -377,3 +377,122 @@ func TestIsPermanent(t *testing.T) {
 		t.Error("IsPermanent should work through fmt.Errorf wrapping")
 	}
 }
+
+func TestDo_AttemptsForError_ExhaustsBeforeGlobal(t *testing.T) {
+	// The per-error budget (2) is smaller than the global budget (10).
+	// The loop should stop after 2 attempts for the target error.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	targetErr := errors.New("rate limited")
+	calls := 0
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		calls++
+		return 0, targetErr
+	},
+		WithAttempts(10),
+		WithAttemptsForError(2, targetErr),
+		WithClock(clk),
+	)
+
+	if calls != 2 {
+		t.Errorf("expected 2 calls, got %d", calls)
+	}
+	if !errors.Is(err, targetErr) {
+		t.Errorf("expected targetErr, got %v", err)
+	}
+}
+
+func TestDo_AttemptsForError_OtherErrorsUnaffected(t *testing.T) {
+	// A per-error budget for errA should not affect retries for errB.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	errA := errors.New("error A")
+	errB := errors.New("error B")
+	calls := 0
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		calls++
+		if calls < 4 {
+			return 0, errB // not the budgeted error — retries freely
+		}
+		return 0, errA // budgeted to 2 attempts; first hit exhausts it
+	},
+		WithAttempts(10),
+		WithAttemptsForError(1, errA),
+		WithClock(clk),
+	)
+
+	if calls != 4 {
+		t.Errorf("expected 4 calls, got %d", calls)
+	}
+	if !errors.Is(err, errA) {
+		t.Errorf("expected errA, got %v", err)
+	}
+}
+
+func TestDo_AttemptsForError_MultipleTargets(t *testing.T) {
+	// Independent budgets for two different errors.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 20)}
+	for i := 0; i < 20; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	errA := errors.New("error A")
+	errB := errors.New("error B")
+	calls := 0
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		calls++
+		if calls%2 == 0 {
+			return 0, errB
+		}
+		return 0, errA
+	},
+		WithAttempts(20),
+		WithAttemptsForError(3, errA), // stops after 3 errA hits
+		WithAttemptsForError(3, errB),
+		WithClock(clk),
+	)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestDo_AttemptsForError_WorksWithWrappedErrors(t *testing.T) {
+	// errors.Is matching should work through fmt.Errorf wrapping.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	sentinel := errors.New("sentinel")
+	calls := 0
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		calls++
+		return 0, fmt.Errorf("wrapped: %w", sentinel)
+	},
+		WithAttempts(10),
+		WithAttemptsForError(2, sentinel),
+		WithClock(clk),
+	)
+
+	if calls != 2 {
+		t.Errorf("expected 2 calls, got %d", calls)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected sentinel in err chain, got %v", err)
+	}
+}
