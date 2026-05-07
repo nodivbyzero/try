@@ -53,6 +53,17 @@
 //	    return true
 //	})
 //
+// # Infinite retry
+//
+// Use [WithInfiniteRetry] to retry until the function succeeds, a [Permanent]
+// error is returned, or the context is cancelled. Always pair this with a
+// context deadline to prevent runaway retries:
+//
+//	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+//	defer cancel()
+//
+//	try.Do(ctx, fn, try.WithInfiniteRetry())
+//
 // # Stopping immediately
 //
 // Wrap an error with [Permanent] to stop the loop without exhausting all

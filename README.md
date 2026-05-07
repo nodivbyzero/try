@@ -10,6 +10,7 @@ A small, generic Go library for retrying fallible operations with exponential ba
 - **`RetryAfterer` interface** — errors can specify their own wait duration (e.g. HTTP 429)
 - **Custom predicates** — decide per-error whether to retry
 - **Testable** — injectable `Clock` interface for time-travel in unit tests
+- **Infinite retry** — `WithInfiniteRetry()` retries until success or context cancellation
 - **Context-aware** — honours cancellation and deadline at every wait point
 
 ## Installation
@@ -34,6 +35,26 @@ val, err := try.Do(ctx, func(ctx context.Context) (string, error) {
 > unless you opt out. For production use, always supply a [`WithRetryIf`](#best-practice-filtering-retryable-errors)
 > predicate to avoid wasting attempts on non-transient failures.
 
+
+## Infinite Retry
+
+Use `WithInfiniteRetry` to retry until the function succeeds, a `Permanent` error
+is returned, or the context is cancelled. Always pair it with a context deadline:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+defer cancel()
+
+val, err := try.Do(ctx, fetchUser,
+    try.WithInfiniteRetry(),
+    try.WithOnRetry(func(info try.RetryInfo) {
+        slog.Warn("retrying", "attempt", info.Attempt, "error", info.Err)
+    }),
+)
+// err will be context.DeadlineExceeded (wrapping the last op error) if
+// the function never succeeds within the timeout.
+```
+
 ## Options
 
 Each option is a functional setter for a field on `Config`:
@@ -41,6 +62,7 @@ Each option is a functional setter for a field on `Config`:
 | Option | `Config` Field | Default | Description |
 |---|---|---|---|
 | `WithAttempts(n int)` | `MaxAttempts` | `5` | Total attempts including the first call |
+| `WithInfiniteRetry()` | `MaxAttempts` | — | Retry until success, `Permanent` error, or context cancellation |
 | `WithInitialDelay(d time.Duration)` | `InitialDelay` | `200ms` | Starting backoff; doubles each attempt up to `MaxDelay` |
 | `WithMaxDelay(d time.Duration)` | `MaxDelay` | `30s` | Upper bound on any single wait regardless of backoff growth |
 | `WithJitter(s JitterStrategy)` | `Jitter` | `FullJitter` | Jitter strategy: `FullJitter` or `EqualJitter` |
@@ -175,6 +197,30 @@ go func() {
 }()
 clk.ch <- time.Now() // advance past first wait instantly
 ```
+
+## Comparison
+
+| Capability | `avast/retry-go` | `nodivbyzero/try` |
+|---|---|---|
+| Exponential backoff | Yes (`BackOffDelay`) | Yes |
+| Jitter | Yes (`RandomDelay`, combinable) | Yes (`FullJitter`, `EqualJitter`) |
+| Context cancellation | Yes | Yes (wraps last error) |
+| Retry predicates | Yes (`RetryIf`, `AttemptsForError`) | Yes (`WithRetryIf`) |
+| Error aggregation | Yes (all errors wrapped) | No (last error only) |
+| Generic return values | Yes (`DoWithData[T]`) | Yes (`Do[T]`) — unified API |
+| Hooks / callbacks | `OnRetry(n uint, err error)` | `OnRetry(RetryInfo)` with delay |
+| Infinite retry | Yes (`Attempts(0)`) | Yes (`WithInfiniteRetry()`) |
+| Custom delay function | Yes (`DelayTypeFunc`) | No |
+| `RetryAfterer` interface | No | Yes |
+| Testable clock | No | Yes (`WithClock`) |
+| Zero dependencies | Yes | Yes |
+| API style | `retry.New(opts...).Do(fn)` | `try.Do(ctx, fn, opts...)` |
+
+**When to use `avast/retry-go`:** you need error aggregation across all attempts,
+custom delay functions, or per-error attempt budgets (`AttemptsForError`).
+
+**When to use `nodivbyzero/try`:** you want a context-first generic API, need to honour
+`Retry-After` headers from error values, or want a testable clock for unit tests without real sleeps.
 
 ## License
 

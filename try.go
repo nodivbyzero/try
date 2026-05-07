@@ -61,7 +61,8 @@ type Config struct {
 // Option defines functional configuration for the retry.
 type Option func(*Config)
 
-// Sane Defaults
+// defaultConfig returns sensible defaults. MaxAttempts of 5 means the
+// function is called at most 5 times. Set MaxAttempts to 0 for infinite retry.
 func defaultConfig() *Config {
 	return &Config{
 		MaxAttempts: 5,
@@ -80,7 +81,10 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 
 	var zero T
 	var lastErr error
-	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
+	// infinite is true when MaxAttempts == 0: retry until success or context
+	// cancellation. Otherwise the loop runs for exactly MaxAttempts iterations.
+	infinite := cfg.MaxAttempts == 0
+	for attempt := 1; infinite || attempt <= cfg.MaxAttempts; attempt++ {
 		val, err := fn(ctx)
 		if err == nil {
 			return val, nil
@@ -88,14 +92,14 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 
 		lastErr = err
 
-		// Bug fix #1: return zero value (not partial val) on non-retryable errors.
 		if !shouldRetry(ctx, cfg, err) {
 			return zero, err
 		}
 
-		// Don't sleep after the last attempt — there's nothing to wait for.
-		// Bug fix #2: skip delay calculation on the final attempt.
-		if attempt == cfg.MaxAttempts {
+		// Skip the delay on the final attempt of a bounded run — there is
+		// nothing to wait for. Infinite loops always sleep between attempts.
+		isFinalAttempt := !infinite && attempt == cfg.MaxAttempts
+		if isFinalAttempt {
 			break
 		}
 
@@ -103,7 +107,7 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 		delay := calculateNextDelay(cfg, attempt, err)
 
 		// Fire the OnRetry callback so callers can log or record metrics.
-		// Not called on the final attempt since no retry will follow.
+		// Not called on the final attempt of a bounded run since no retry follows.
 		if cfg.OnRetry != nil {
 			cfg.OnRetry(RetryInfo{Attempt: attempt, Err: err, Delay: delay})
 		}

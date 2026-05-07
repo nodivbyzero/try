@@ -285,3 +285,75 @@ func TestDo_LargeInitialDelay_NoPanic(t *testing.T) {
 		}
 	}
 }
+
+func TestDo_InfiniteRetry_SucceedsEventually(t *testing.T) {
+	// WithInfiniteRetry should keep retrying until the function succeeds.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 20)}
+	for i := 0; i < 20; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	attempt := 0
+	val, err := Do(ctx, func(ctx context.Context) (int, error) {
+		attempt++
+		if attempt < 10 {
+			return 0, errors.New("not yet")
+		}
+		return attempt, nil
+	},
+		WithInfiniteRetry(),
+		WithClock(clk),
+	)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if val != 10 {
+		t.Errorf("expected val=10, got %d", val)
+	}
+}
+
+func TestDo_InfiniteRetry_StopsOnContextCancel(t *testing.T) {
+	// WithInfiniteRetry must stop when the context is cancelled.
+	ctx, cancel := context.WithCancel(context.Background())
+	clk := &testClock{afterChan: make(chan time.Time)}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("always fails")
+	},
+		WithInfiniteRetry(),
+		WithClock(clk),
+	)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestDo_InfiniteRetry_StopsOnPermanent(t *testing.T) {
+	// WithInfiniteRetry must still honour Permanent errors.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 5)}
+
+	calls := 0
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		calls++
+		return 0, Permanent(errors.New("fatal"))
+	},
+		WithInfiniteRetry(),
+		WithClock(clk),
+	)
+
+	if calls != 1 {
+		t.Errorf("expected 1 call, got %d", calls)
+	}
+	if err == nil || err.Error() != "fatal" {
+		t.Errorf("expected 'fatal' error, got %v", err)
+	}
+}

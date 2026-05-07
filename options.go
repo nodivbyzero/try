@@ -2,6 +2,8 @@ package try
 
 import "time"
 
+// WithAttempts sets the maximum number of attempts, including the first call.
+// See also WithInfiniteRetry.
 func WithAttempts(n int) Option {
 	return func(c *Config) { c.MaxAttempts = n }
 }
@@ -30,4 +32,11 @@ func WithOnRetry(fn func(RetryInfo)) Option {
 
 func WithMaxDelay(d time.Duration) Option {
 	return func(c *Config) { c.MaxDelay = d }
+}
+
+// WithInfiniteRetry removes the attempt cap entirely. Do will retry until the
+// function succeeds, a Permanent error is returned, or the context is cancelled.
+// Always pair this with a context deadline to prevent runaway retries.
+func WithInfiniteRetry() Option {
+	return func(c *Config) { c.MaxAttempts = 0 }
 }
