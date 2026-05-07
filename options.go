@@ -63,3 +63,11 @@ func WithAttemptsForError(n int, target error) Option {
 func WithTimeout(d time.Duration) Option {
 	return func(c *Config) { c.AttemptTimeout = d }
 }
+
+// WithAllErrors enables error aggregation. When set, Do collects every
+// attempt error and returns them as *AttemptErrors, which implements
+// Unwrap() []error so that errors.Is and errors.As traverse the full
+// history. Without this option only the last error is returned.
+func WithAllErrors() Option {
+	return func(c *Config) { c.AllErrors = true }
+}

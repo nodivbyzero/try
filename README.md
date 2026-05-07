@@ -10,6 +10,7 @@ A small, generic Go library for retrying fallible operations with exponential ba
 - **`IsPermanent(err)`** — inspect whether an error originated from a permanent failure
 - **Per-error budgets** — `WithAttemptsForError(n, err)` caps retries for a specific error independently of the global limit
 - **Per-attempt timeout** — `WithTimeout(d)` cancels a single slow attempt without affecting the overall retry budget
+- **Error aggregation** — `WithAllErrors()` collects every attempt error; inspect the full history via `errors.Is` / `errors.As`
 - **`RetryAfterer` interface** — errors can specify their own wait duration (e.g. HTTP 429)
 - **Custom predicates** — decide per-error whether to retry
 - **Testable** — injectable `Clock` interface for time-travel in unit tests
@@ -72,6 +73,7 @@ Each option is a functional setter for a field on `Config`:
 | `WithRetryIf(fn func(error) bool)` | `Predicate` | retry all | Return `false` to stop retrying for a given error |
 | `WithAttemptsForError(n int, err error)` | `ErrorBudgets` | — | Cap retries for a specific error; multiple calls accumulate |
 | `WithTimeout(d time.Duration)` | `AttemptTimeout` | disabled | Per-attempt deadline; cancelled attempts are retried |
+| `WithAllErrors()` | `AllErrors` | false | Aggregate all attempt errors into `*AttemptErrors` |
 | `WithOnRetry(fn func(RetryInfo))` | `OnRetry` | nil | Callback fired before each wait — use for logging or metrics |
 | `WithClock(clk Clock)` | `Clock` | `time.After` | Injectable clock for time-travel in tests |
 
@@ -147,6 +149,35 @@ The exponential cap for attempt `n` is `min(MaxDelay, InitialDelay × 2^(n−1))
 | `EqualJitter` | `cap/2 + rand[0, cap/2)` | Guarantees at least half the backoff; softer lower bound |
 
 Both strategies enforce a 1ms minimum floor. The Full Jitter approach is recommended by [AWS](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for avoiding thundering herd; Equal Jitter is preferable when a minimum wait time matters.
+
+## Error Aggregation
+
+By default `Do` returns only the last attempt's error. Use `WithAllErrors` to
+collect every attempt error into `*AttemptErrors`, which implements
+`Unwrap() []error` for Go 1.20+ multi-error unwrapping. This lets you inspect
+the full failure history with `errors.Is` and `errors.As`:
+
+```go
+_, err := try.Do(ctx, fn,
+    try.WithAttempts(3),
+    try.WithAllErrors(),
+)
+
+var ae *try.AttemptErrors
+if errors.As(err, &ae) {
+    for i, e := range ae.Unwrap() {
+        slog.Warn("attempt failed", "attempt", i+1, "error", e)
+    }
+}
+
+// errors.Is traverses all attempt errors, not just the last one.
+if errors.Is(err, ErrRateLimit) {
+    // at least one attempt was rate-limited
+}
+```
+
+`WithAllErrors` is opt-in — the default behaviour (last error only) is
+unchanged and has no allocation overhead.
 
 ## Per-Attempt Timeout
 

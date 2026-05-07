@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 )
 
@@ -64,7 +65,29 @@ type Config struct {
 	// Zero means no per-attempt timeout (default). Distinct from the parent
 	// context deadline, which governs the entire retry operation.
 	AttemptTimeout time.Duration
+	// AllErrors enables error aggregation. When true, Do collects every
+	// attempt error and returns them joined via errors.Join so that
+	// errors.Is / errors.As can inspect the full history.
+	AllErrors bool
 }
+
+// AttemptErrors is the joined error type returned when WithAllErrors is set.
+// It implements Unwrap() []error for Go 1.20+ multi-error unwrapping, so
+// errors.Is and errors.As traverse every attempt's error.
+type AttemptErrors struct {
+	errs []error
+}
+
+func (e *AttemptErrors) Error() string {
+	msgs := make([]string, len(e.errs))
+	for i, err := range e.errs {
+		msgs[i] = fmt.Sprintf("attempt %d: %v", i+1, err)
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// Unwrap returns all attempt errors for errors.Is / errors.As traversal.
+func (e *AttemptErrors) Unwrap() []error { return e.errs }
 
 // Option defines functional configuration for the retry.
 type Option func(*Config)
@@ -89,6 +112,7 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 
 	var zero T
 	var lastErr error
+	var allErrs []error // populated when cfg.AllErrors is set
 	// infinite is true when MaxAttempts == 0: retry until success or context
 	// cancellation. Otherwise the loop runs for exactly MaxAttempts iterations.
 	infinite := cfg.MaxAttempts == 0
@@ -97,7 +121,12 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 		// call fn. This handles the case where ctx was cancelled before the first
 		// attempt, or was cancelled during the previous attempt's execution.
 		if ctx.Err() != nil {
-			return zero, fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
+			ctxErr := fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
+			if cfg.AllErrors && len(allErrs) > 0 {
+				allErrs = append(allErrs, ctxErr)
+				return zero, &AttemptErrors{errs: allErrs}
+			}
+			return zero, ctxErr
 		}
 
 		// Wrap the parent context with a per-attempt deadline if configured.
@@ -120,8 +149,14 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 		}
 
 		lastErr = err
+		if cfg.AllErrors {
+			allErrs = append(allErrs, err)
+		}
 
 		if !shouldRetry(ctx, cfg, err) {
+			if cfg.AllErrors {
+				return zero, &AttemptErrors{errs: allErrs}
+			}
 			return zero, err
 		}
 
@@ -154,6 +189,9 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 		}
 	}
 
+	if cfg.AllErrors && len(allErrs) > 0 {
+		return zero, &AttemptErrors{errs: allErrs}
+	}
 	return zero, lastErr
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -564,5 +565,124 @@ func TestDo_WithTimeout_ParentCancelStopsLoop(t *testing.T) {
 
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestDo_WithAllErrors_CollectsAllAttempts(t *testing.T) {
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	err1 := errors.New("attempt 1 failed")
+	err2 := errors.New("attempt 2 failed")
+	err3 := errors.New("attempt 3 failed")
+	errs := []error{err1, err2, err3}
+	call := 0
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		e := errs[call]
+		call++
+		return 0, e
+	},
+		WithAttempts(3),
+		WithAllErrors(),
+		WithClock(clk),
+	)
+
+	var ae *AttemptErrors
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected *AttemptErrors, got %T: %v", err, err)
+	}
+	if len(ae.Unwrap()) != 3 {
+		t.Errorf("expected 3 errors, got %d", len(ae.Unwrap()))
+	}
+	// All individual errors accessible via errors.Is.
+	for _, target := range errs {
+		if !errors.Is(err, target) {
+			t.Errorf("expected errors.Is(err, %v) to be true", target)
+		}
+	}
+}
+
+func TestDo_WithAllErrors_ErrorMessage(t *testing.T) {
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 5)}
+	for i := 0; i < 5; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("boom")
+	},
+		WithAttempts(2),
+		WithAllErrors(),
+		WithClock(clk),
+	)
+
+	msg := err.Error()
+	if !strings.Contains(msg, "attempt 1:") || !strings.Contains(msg, "attempt 2:") {
+		t.Errorf("expected message to contain attempt labels, got: %s", msg)
+	}
+}
+
+func TestDo_WithAllErrors_StopsOnPermanent(t *testing.T) {
+	// Permanent errors should still short-circuit; only the errors up to that
+	// point are aggregated.
+	ctx := context.Background()
+
+	call := 0
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		call++
+		if call == 2 {
+			return 0, Permanent(errors.New("fatal"))
+		}
+		return 0, errors.New("transient")
+	},
+		WithAttempts(5),
+		WithAllErrors(),
+		WithInitialDelay(time.Millisecond),
+	)
+
+	var ae *AttemptErrors
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected *AttemptErrors, got %T", err)
+	}
+	if len(ae.Unwrap()) != 2 {
+		t.Errorf("expected 2 errors (transient + fatal), got %d", len(ae.Unwrap()))
+	}
+	if call != 2 {
+		t.Errorf("expected 2 calls, got %d", call)
+	}
+}
+
+func TestDo_WithoutAllErrors_ReturnsLastOnly(t *testing.T) {
+	// Default behaviour: only last error returned, no AttemptErrors wrapper.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 5)}
+	for i := 0; i < 5; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	lastErr := errors.New("last")
+	call := 0
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		call++
+		if call < 3 {
+			return 0, errors.New("earlier")
+		}
+		return 0, lastErr
+	},
+		WithAttempts(3),
+		WithClock(clk),
+	)
+
+	if !errors.Is(err, lastErr) {
+		t.Errorf("expected lastErr, got %v", err)
+	}
+	var ae *AttemptErrors
+	if errors.As(err, &ae) {
+		t.Error("expected no *AttemptErrors without WithAllErrors")
 	}
 }

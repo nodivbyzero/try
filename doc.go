@@ -64,6 +64,25 @@
 //
 //	try.Do(ctx, fn, try.WithInfiniteRetry())
 //
+// # Error aggregation
+//
+// By default Do returns only the last attempt's error. Use [WithAllErrors] to
+// collect every attempt error into an [AttemptErrors] value. Because
+// AttemptErrors implements Unwrap() []error, the full history is searchable
+// with errors.Is and errors.As:
+//
+//	_, err := try.Do(ctx, fn, try.WithAttempts(3), try.WithAllErrors())
+//
+//	var ae *try.AttemptErrors
+//	if errors.As(err, &ae) {
+//	    for i, e := range ae.Unwrap() {
+//	        log.Printf("attempt %d: %v", i+1, e)
+//	    }
+//	}
+//
+//	// errors.Is still works across the full history:
+//	if errors.Is(err, ErrRateLimit) { ... }
+//
 // # Per-attempt timeout
 //
 // [WithTimeout] sets a deadline on each individual call to fn, independent of
