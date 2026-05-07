@@ -9,6 +9,7 @@ A small, generic Go library for retrying fallible operations with exponential ba
 - **`Permanent` errors** — stop retrying immediately for non-recoverable failures
 - **`IsPermanent(err)`** — inspect whether an error originated from a permanent failure
 - **Per-error budgets** — `WithAttemptsForError(n, err)` caps retries for a specific error independently of the global limit
+- **Per-attempt timeout** — `WithTimeout(d)` cancels a single slow attempt without affecting the overall retry budget
 - **`RetryAfterer` interface** — errors can specify their own wait duration (e.g. HTTP 429)
 - **Custom predicates** — decide per-error whether to retry
 - **Testable** — injectable `Clock` interface for time-travel in unit tests
@@ -70,6 +71,7 @@ Each option is a functional setter for a field on `Config`:
 | `WithJitter(s JitterStrategy)` | `Jitter` | `FullJitter` | Jitter strategy: `FullJitter` or `EqualJitter` |
 | `WithRetryIf(fn func(error) bool)` | `Predicate` | retry all | Return `false` to stop retrying for a given error |
 | `WithAttemptsForError(n int, err error)` | `ErrorBudgets` | — | Cap retries for a specific error; multiple calls accumulate |
+| `WithTimeout(d time.Duration)` | `AttemptTimeout` | disabled | Per-attempt deadline; cancelled attempts are retried |
 | `WithOnRetry(fn func(RetryInfo))` | `OnRetry` | nil | Callback fired before each wait — use for logging or metrics |
 | `WithClock(clk Clock)` | `Clock` | `time.After` | Injectable clock for time-travel in tests |
 
@@ -145,6 +147,29 @@ The exponential cap for attempt `n` is `min(MaxDelay, InitialDelay × 2^(n−1))
 | `EqualJitter` | `cap/2 + rand[0, cap/2)` | Guarantees at least half the backoff; softer lower bound |
 
 Both strategies enforce a 1ms minimum floor. The Full Jitter approach is recommended by [AWS](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for avoiding thundering herd; Equal Jitter is preferable when a minimum wait time matters.
+
+## Per-Attempt Timeout
+
+`WithTimeout` sets a deadline on each individual call to `fn`, distinct from the
+parent context deadline which governs the entire retry operation. If `fn` blocks
+longer than the timeout its context is cancelled and the attempt is retried:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // overall budget
+defer cancel()
+
+val, err := try.Do(ctx, callSlowService,
+    try.WithAttempts(5),
+    try.WithTimeout(2*time.Second), // each attempt gets 2s
+    try.WithRetryIf(func(err error) bool {
+        // Retry per-attempt timeouts; stop on other errors.
+        return errors.Is(err, context.DeadlineExceeded)
+    }),
+)
+```
+
+The parent context deadline still governs the overall operation — if the parent
+is cancelled mid-retry the loop stops immediately.
 
 ## Per-Error Attempt Budgets
 

@@ -54,3 +54,12 @@ func WithAttemptsForError(n int, target error) Option {
 		})
 	}
 }
+
+// WithTimeout sets a deadline on each individual call to fn, distinct from
+// the parent context deadline which governs the entire retry operation.
+// If fn exceeds the timeout, its context is cancelled and the attempt is
+// retried (subject to the usual retry rules). Zero disables per-attempt
+// timeouts, which is the default.
+func WithTimeout(d time.Duration) Option {
+	return func(c *Config) { c.AttemptTimeout = d }
+}

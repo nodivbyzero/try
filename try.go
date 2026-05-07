@@ -60,6 +60,10 @@ type Config struct {
 	// Each entry is checked independently; the first exhausted budget stops retries
 	// for that error, and counts against the global MaxAttempts budget too.
 	ErrorBudgets []errorBudget
+	// AttemptTimeout limits how long a single call to fn may run.
+	// Zero means no per-attempt timeout (default). Distinct from the parent
+	// context deadline, which governs the entire retry operation.
+	AttemptTimeout time.Duration
 }
 
 // Option defines functional configuration for the retry.
@@ -89,7 +93,28 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 	// cancellation. Otherwise the loop runs for exactly MaxAttempts iterations.
 	infinite := cfg.MaxAttempts == 0
 	for attempt := 1; infinite || attempt <= cfg.MaxAttempts; attempt++ {
-		val, err := fn(ctx)
+		// Bail immediately if the parent context is already done before we even
+		// call fn. This handles the case where ctx was cancelled before the first
+		// attempt, or was cancelled during the previous attempt's execution.
+		if ctx.Err() != nil {
+			return zero, fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
+		}
+
+		// Wrap the parent context with a per-attempt deadline if configured.
+		// The timeout context is always cancelled after fn returns to free
+		// resources, regardless of success or failure.
+		attemptCtx := ctx
+		var cancelAttempt context.CancelFunc
+		if cfg.AttemptTimeout > 0 {
+			attemptCtx, cancelAttempt = context.WithTimeout(ctx, cfg.AttemptTimeout)
+		}
+
+		val, err := fn(attemptCtx)
+
+		if cancelAttempt != nil {
+			cancelAttempt()
+		}
+
 		if err == nil {
 			return val, nil
 		}
@@ -170,7 +195,11 @@ func matchBudget(budgets []errorBudget, err error) *errorBudget {
 }
 
 func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// Stop if the parent context is done — check ctx.Err() rather than the
+	// error value so that per-attempt timeouts (a child context) are not
+	// mistaken for parent cancellation. A DeadlineExceeded from a child
+	// context should be retried; one from the parent should not.
+	if ctx.Err() != nil {
 		return false
 	}
 	var p *permanentError

@@ -64,6 +64,21 @@
 //
 //	try.Do(ctx, fn, try.WithInfiniteRetry())
 //
+// # Per-attempt timeout
+//
+// [WithTimeout] sets a deadline on each individual call to fn, independent of
+// the parent context deadline which governs the entire retry operation. If fn
+// exceeds the timeout its context is cancelled and the attempt is retried:
+//
+//	try.Do(ctx, fn,
+//	    try.WithAttempts(5),
+//	    try.WithTimeout(500*time.Millisecond), // each attempt gets 500ms
+//	)
+//
+// The parent context deadline still governs the overall operation. A slow fn
+// that hits the per-attempt timeout receives context.DeadlineExceeded on its
+// child context; the parent context remains live and the retry loop continues.
+//
 // # Per-error attempt budgets
 //
 // [WithAttemptsForError] sets an independent retry cap for a specific error.

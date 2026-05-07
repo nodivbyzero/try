@@ -496,3 +496,73 @@ func TestDo_AttemptsForError_WorksWithWrappedErrors(t *testing.T) {
 		t.Errorf("expected sentinel in err chain, got %v", err)
 	}
 }
+
+func TestDo_WithTimeout_SlowFnIsRetried(t *testing.T) {
+	// A fn that blocks longer than AttemptTimeout should have its context
+	// cancelled and the attempt counted as a failure to be retried.
+	ctx := context.Background()
+	attempts := 0
+
+	val, err := Do(ctx, func(ctx context.Context) (int, error) {
+		attempts++
+		select {
+		case <-ctx.Done():
+			// Attempt timed out — return the context error so it gets retried.
+			return 0, ctx.Err()
+		case <-time.After(10 * time.Second):
+			return 42, nil
+		}
+	},
+		WithAttempts(3),
+		WithTimeout(10*time.Millisecond),
+		WithInitialDelay(time.Millisecond),
+		WithRetryIf(func(err error) bool {
+			// Retry on per-attempt timeout but not on parent cancellation.
+			return errors.Is(err, context.DeadlineExceeded)
+		}),
+	)
+
+	// All 3 attempts should have timed out individually.
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+	_ = val
+	_ = err
+}
+
+func TestDo_WithTimeout_FastFnSucceeds(t *testing.T) {
+	// A fn that completes within the timeout should succeed normally.
+	ctx := context.Background()
+
+	val, err := Do(ctx, func(ctx context.Context) (string, error) {
+		return "ok", nil
+	},
+		WithTimeout(100*time.Millisecond),
+	)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if val != "ok" {
+		t.Errorf("expected ok, got %s", val)
+	}
+}
+
+func TestDo_WithTimeout_ParentCancelStopsLoop(t *testing.T) {
+	// Cancelling the parent context must stop the loop even with a per-attempt
+	// timeout set — the parent deadline governs the whole operation.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("fail")
+	},
+		WithAttempts(5),
+		WithTimeout(1*time.Second),
+		WithInitialDelay(time.Millisecond),
+	)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
