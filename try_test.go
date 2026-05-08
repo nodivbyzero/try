@@ -909,3 +909,39 @@ func TestDo_ContextCancelledBeforeFirstAttempt_NoNilSuffix(t *testing.T) {
 		t.Errorf("error message contains '<nil>': %q", err.Error())
 	}
 }
+
+func TestWithAttempts_ZeroClampedToOne(t *testing.T) {
+	// WithAttempts(0) must not trigger infinite retry — it should be treated
+	// as a single attempt with no retries.
+	ctx := context.Background()
+	calls := 0
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		calls++
+		return 0, errors.New("fail")
+	}, WithAttempts(0))
+
+	if calls != 1 {
+		t.Errorf("expected exactly 1 call, got %d", calls)
+	}
+	if err == nil {
+		t.Error("expected an error, got nil")
+	}
+}
+
+func TestWithAttempts_NegativeClampedToOne(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		calls++
+		return 0, errors.New("fail")
+	}, WithAttempts(-5))
+
+	if calls != 1 {
+		t.Errorf("expected exactly 1 call, got %d", calls)
+	}
+	if err == nil {
+		t.Error("expected an error, got nil")
+	}
+}

@@ -3,8 +3,12 @@ package try
 import "time"
 
 // WithAttempts sets the maximum number of attempts, including the first call.
-// See also WithInfiniteRetry.
+// n must be >= 1; values less than 1 are clamped to 1 (a single attempt with
+// no retries). To retry without an upper bound use [WithInfiniteRetry] instead.
 func WithAttempts(n int) Option {
+	if n < 1 {
+		n = 1
+	}
 	return func(c *Config) { c.MaxAttempts = n }
 }
 
