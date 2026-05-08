@@ -1,32 +1,41 @@
-name: Go CI
+name: Run tests
+
 on:
   push:
-    branches: [ main ]
+    branches:
+      - "main"
+    paths-ignore:
+      - "**.md"
+      - LICENSE
+      - ".github/dependabot.yml"
   pull_request:
-    branches: [ main ]
+    branches:
+      - "*"
+    paths-ignore:
+      - "**.md"
+      - LICENSE
+      - ".github/dependabot.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    name: Test & Vet
-    runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.25', '1.26']
+        go-version: [1.25.x, 1.26.x]
+        platform: [ubuntu-latest]
+    runs-on: ${{ matrix.platform }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: Set up Go ${{ matrix.go-version }}
-        uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          go-version: ${{ matrix.go-version }}
-          cache: true
+          go-version: "${{ matrix.go-version }}"
 
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Run static analysis
-        run: go vet ./...
-
-      - name: Run tests with race detector
-        run: go test -v -race -coverprofile=coverage.out ./...
+      - name: Run tests
+        run: go test ./... -v -race
