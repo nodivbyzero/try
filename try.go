@@ -224,15 +224,17 @@ type errorBudget struct {
 	remaining int
 }
 
-// matchBudget returns a pointer to the first budget whose target matches err
-// via errors.Is, or nil if no budget applies.
-func matchBudget(budgets []errorBudget, err error) *errorBudget {
+// matchBudgetIndex returns the index of the first budget whose target matches
+// err via errors.Is, or -1 if no budget applies. Returning an index rather
+// than a pointer makes mutation explicit at the call site and avoids any
+// ambiguity about slice backing-array stability.
+func matchBudgetIndex(budgets []errorBudget, err error) int {
 	for i := range budgets {
 		if errors.Is(err, budgets[i].target) {
-			return &budgets[i]
+			return i
 		}
 	}
-	return nil
+	return -1
 }
 
 // cancelledErr builds the error returned when the parent context is done.
@@ -266,11 +268,11 @@ func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
 	if errors.As(err, &p) {
 		return false
 	}
-	if b := matchBudget(cfg.ErrorBudgets, err); b != nil {
-		if b.remaining <= 0 {
+	if i := matchBudgetIndex(cfg.ErrorBudgets, err); i >= 0 {
+		if cfg.ErrorBudgets[i].remaining <= 0 {
 			return false
 		}
-		b.remaining--
+		cfg.ErrorBudgets[i].remaining-- // direct index mutation — no pointer aliasing
 	}
 	if cfg.Predicate != nil {
 		return cfg.Predicate(err)
