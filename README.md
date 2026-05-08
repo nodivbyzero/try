@@ -12,6 +12,7 @@ A small, generic Go library for retrying fallible operations with exponential ba
 - **Per-attempt timeout** — `WithTimeout(d)` cancels a single slow attempt without affecting the overall retry budget
 - **Error aggregation** — `WithAllErrors()` collects every attempt error; inspect the full history via `errors.Is` / `errors.As`
 - **Custom delay function** — `WithDelayFunc` replaces the built-in backoff with any schedule: fixed, linear, or error-dependent
+- **Jitter window cap** — `WithMaxJitter(d)` constrains spread independently of the backoff cap
 - **`RetryAfterer` interface** — errors can specify their own wait duration (e.g. HTTP 429)
 - **Custom predicates** — decide per-error whether to retry
 - **Testable** — injectable `Clock` interface for time-travel in unit tests
@@ -72,6 +73,7 @@ Each option is a functional setter for a field on `Config`:
 | `WithMaxDelay(d time.Duration)` | `MaxDelay` | `30s` | Upper bound on any single wait regardless of backoff growth |
 | `WithJitter(s JitterStrategy)` | `Jitter` | `FullJitter` | Jitter strategy: `FullJitter` or `EqualJitter` |
 | `WithDelayFunc(fn func(int, error) time.Duration)` | `DelayFunc` | nil | Replace built-in backoff entirely; `RetryAfterer` still takes precedence |
+| `WithMaxJitter(d time.Duration)` | `MaxJitter` | disabled | Cap jitter window independently of backoff cap |
 | `WithRetryIf(fn func(error) bool)` | `Predicate` | retry all | Return `false` to stop retrying for a given error |
 | `WithAttemptsForError(n int, err error)` | `ErrorBudgets` | — | Cap retries for a specific error; multiple calls accumulate |
 | `WithTimeout(d time.Duration)` | `AttemptTimeout` | disabled | Per-attempt deadline; cancelled attempts are retried |
@@ -151,6 +153,26 @@ The exponential cap for attempt `n` is `min(MaxDelay, InitialDelay × 2^(n−1))
 | `EqualJitter` | `cap/2 + rand[0, cap/2)` | Guarantees at least half the backoff; softer lower bound |
 
 Both strategies enforce a 1ms minimum floor. The Full Jitter approach is recommended by [AWS](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) for avoiding thundering herd; Equal Jitter is preferable when a minimum wait time matters.
+
+## Jitter Window Cap
+
+By default the jitter window equals the full backoff cap, so `FullJitter` with
+a 30s cap draws delays from the entire `[0, 30s)` range. Use `WithMaxJitter`
+to constrain the spread independently — useful for services where you want long
+base delays but minimal pile-up variance:
+
+```go
+// Base delay grows to 30s, but jitter is capped at 500ms.
+// Delays will be in [0, 500ms) regardless of how large the backoff has grown.
+try.Do(ctx, fn,
+    try.WithInitialDelay(1*time.Second),
+    try.WithMaxDelay(30*time.Second),
+    try.WithMaxJitter(500*time.Millisecond),
+)
+```
+
+When `MaxJitter` is larger than the current backoff cap it has no effect —
+the backoff cap is always the effective ceiling.
 
 ## Custom Delay Function
 

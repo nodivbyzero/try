@@ -91,3 +91,19 @@ func WithAllErrors() Option {
 func WithDelayFunc(fn func(attempt int, err error) time.Duration) Option {
 	return func(c *Config) { c.DelayFunc = fn }
 }
+
+// WithMaxJitter caps the jitter window independently of the backoff cap.
+// Useful when you want long base delays with a small spread — for example,
+// a 30s base delay with at most 500ms of jitter to avoid pile-ups without
+// adding significant extra wait time.
+//
+// Without WithMaxJitter, the jitter window equals the full backoff cap, so
+// a 30s cap produces delays anywhere in [0, 30s) with FullJitter.
+// With WithMaxJitter(500ms), delays are drawn from [0, 500ms) regardless
+// of how large the backoff cap has grown.
+//
+// WithMaxJitter has no effect when WithDelayFunc is set, since the custom
+// function owns the delay calculation entirely.
+func WithMaxJitter(d time.Duration) Option {
+	return func(c *Config) { c.MaxJitter = d }
+}

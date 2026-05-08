@@ -73,6 +73,10 @@ type Config struct {
 	// When set, it is called instead of calculateNextDelay. RetryAfterer
 	// on the error is still respected before DelayFunc is consulted.
 	DelayFunc func(attempt int, err error) time.Duration
+	// MaxJitter caps the jitter window independently of the backoff cap.
+	// Zero means no independent jitter cap — the full backoff cap is used
+	// as the jitter window (default behaviour).
+	MaxJitter time.Duration
 }
 
 // AttemptErrors is the joined error type returned when WithAllErrors is set.
@@ -298,7 +302,14 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 		cap = cfg.MaxDelay
 	}
 
-	// 4. Enforce the 1ms floor on the cap *before* passing it to Int64N.
+	// 4. Apply MaxJitter cap: if set, the jitter window is the lesser of the
+	// computed exponential cap and MaxJitter. This allows long deterministic
+	// base delays with a small spread (e.g. 30s base ± 500ms jitter).
+	if cfg.MaxJitter > 0 && cfg.MaxJitter < cap {
+		cap = cfg.MaxJitter
+	}
+
+	// 5. Enforce the 1ms floor on the cap *before* passing it to Int64N.
 	// rand.Int64N(n) panics if n <= 0, which can happen when InitialDelay is
 	// very small (e.g. 1ns) and the computed cap rounds down to zero or below
 	// the minimum meaningful range. Clamping here is safe: if cap < 1ms the
@@ -307,7 +318,7 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 		cap = time.Millisecond
 	}
 
-	// 5. Apply jitter strategy.
+	// 6. Apply jitter strategy.
 	var d time.Duration
 	switch cfg.Jitter {
 	case EqualJitter:

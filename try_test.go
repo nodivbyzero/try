@@ -780,3 +780,69 @@ func TestDo_WithDelayFunc_RetryAftererStillTakesPrecedence(t *testing.T) {
 		t.Errorf("expected RetryAfterer delay %v, got %v", raDelay, observedDelay)
 	}
 }
+
+func TestDo_WithMaxJitter_CapsJitterWindow(t *testing.T) {
+	// With a large backoff cap but small MaxJitter, all delays must be <= MaxJitter.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 20)}
+	for i := 0; i < 20; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	const maxJitter = 50 * time.Millisecond
+	var observedDelays []time.Duration
+
+	_, _ = Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("fail")
+	},
+		WithAttempts(6),
+		WithInitialDelay(10*time.Second), // large base — without MaxJitter delays could be huge
+		WithMaxDelay(60*time.Second),
+		WithMaxJitter(maxJitter),
+		WithClock(clk),
+		WithOnRetry(func(info RetryInfo) {
+			observedDelays = append(observedDelays, info.Delay)
+		}),
+	)
+
+	if len(observedDelays) == 0 {
+		t.Fatal("expected at least one delay observation")
+	}
+	for i, d := range observedDelays {
+		if d > maxJitter {
+			t.Errorf("delay[%d] = %v, exceeds MaxJitter %v", i, d, maxJitter)
+		}
+	}
+}
+
+func TestDo_WithMaxJitter_LargerThanCap_NoEffect(t *testing.T) {
+	// When MaxJitter >= backoff cap, it has no effect — delays stay within
+	// the normal backoff window.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	const smallCap = 10 * time.Millisecond
+	var observedDelays []time.Duration
+
+	_, _ = Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("fail")
+	},
+		WithAttempts(3),
+		WithInitialDelay(smallCap),
+		WithMaxDelay(smallCap),
+		WithMaxJitter(10*time.Second), // much larger than cap — should have no effect
+		WithClock(clk),
+		WithOnRetry(func(info RetryInfo) {
+			observedDelays = append(observedDelays, info.Delay)
+		}),
+	)
+
+	for i, d := range observedDelays {
+		if d > smallCap {
+			t.Errorf("delay[%d] = %v exceeds backoff cap %v", i, d, smallCap)
+		}
+	}
+}
