@@ -945,3 +945,75 @@ func TestWithAttempts_NegativeClampedToOne(t *testing.T) {
 		t.Error("expected an error, got nil")
 	}
 }
+
+func TestSanitize_NegativeDelaysClamped(t *testing.T) {
+	ctx := context.Background()
+
+	// Negative InitialDelay and MaxDelay must not panic or produce bad behaviour.
+	calls := 0
+	val, err := Do(ctx, func(ctx context.Context) (int, error) {
+		calls++
+		if calls < 2 {
+			return 0, errors.New("fail")
+		}
+		return 42, nil
+	},
+		WithAttempts(3),
+		WithInitialDelay(-1*time.Second),
+		WithMaxDelay(-1*time.Second),
+	)
+
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if val != 42 {
+		t.Errorf("expected 42, got %d", val)
+	}
+}
+
+func TestSanitize_InitialDelayExceedsMaxDelay_CappedToMaxDelay(t *testing.T) {
+	// When InitialDelay > MaxDelay, InitialDelay is clamped to MaxDelay.
+	// All observed delays must be <= MaxDelay.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	const maxDelay = 100 * time.Millisecond
+	var observedDelays []time.Duration
+
+	_, _ = Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("fail")
+	},
+		WithAttempts(4),
+		WithInitialDelay(10*time.Second), // larger than MaxDelay
+		WithMaxDelay(maxDelay),
+		WithClock(clk),
+		WithOnRetry(func(info RetryInfo) {
+			observedDelays = append(observedDelays, info.Delay)
+		}),
+	)
+
+	for i, d := range observedDelays {
+		if d > maxDelay {
+			t.Errorf("delay[%d] = %v exceeds MaxDelay %v", i, d, maxDelay)
+		}
+	}
+}
+
+func TestSanitize_NegativeAttemptTimeout_Disabled(t *testing.T) {
+	// Negative AttemptTimeout must be treated as disabled (no per-attempt deadline).
+	ctx := context.Background()
+
+	val, err := Do(ctx, func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, WithTimeout(-1*time.Second))
+
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if val != "ok" {
+		t.Errorf("expected ok, got %s", val)
+	}
+}

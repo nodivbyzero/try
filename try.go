@@ -100,6 +100,31 @@ func (e *AttemptErrors) Unwrap() []error { return e.errs }
 // Option defines functional configuration for the retry.
 type Option func(*Config)
 
+// sanitize clamps any Config fields that would produce undefined or harmful
+// behaviour. It is called once per Do invocation, after all options are applied.
+// Rather than panicking on bad input the library silently corrects it so that
+// misconfigured programs degrade gracefully.
+func sanitize(cfg *Config) {
+	// Negative delays make no sense — treat them as zero (no delay).
+	if cfg.InitialDelay < 0 {
+		cfg.InitialDelay = 0
+	}
+	if cfg.MaxDelay < 0 {
+		cfg.MaxDelay = 0
+	}
+	if cfg.AttemptTimeout < 0 {
+		cfg.AttemptTimeout = 0
+	}
+	if cfg.MaxJitter < 0 {
+		cfg.MaxJitter = 0
+	}
+	// If InitialDelay exceeds MaxDelay, cap InitialDelay to MaxDelay so the
+	// first backoff is never larger than the configured ceiling.
+	if cfg.MaxDelay > 0 && cfg.InitialDelay > cfg.MaxDelay {
+		cfg.InitialDelay = cfg.MaxDelay
+	}
+}
+
 // defaultConfig returns sensible defaults. MaxAttempts of 5 means the
 // function is called at most 5 times. Set MaxAttempts to 0 for infinite retry.
 func defaultConfig() *Config {
@@ -117,6 +142,7 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	sanitize(cfg)
 
 	var zero T
 	var lastErr error
