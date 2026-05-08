@@ -846,3 +846,45 @@ func TestDo_WithMaxJitter_LargerThanCap_NoEffect(t *testing.T) {
 		}
 	}
 }
+
+func TestDo_WithAllErrors_ContextCancelReturnsAttemptErrors(t *testing.T) {
+	// Regression: when AllErrors is set and ctx is cancelled during the wait,
+	// the returned error must be *AttemptErrors so the full history including
+	// context.Canceled is reachable via errors.Is / errors.As.
+	clk := &testClock{afterChan: make(chan time.Time)} // never ticks
+	ctx, cancel := context.WithCancel(context.Background())
+
+	opErr := errors.New("op failed")
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := Do(ctx, func(ctx context.Context) (int, error) {
+			return 0, opErr
+		},
+			WithAttempts(5),
+			WithAllErrors(),
+			WithClock(clk),
+		)
+		done <- err
+	}()
+
+	// Let one attempt run, then cancel while Do waits on the clock.
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	err := <-done
+
+	// Must be *AttemptErrors, not a bare fmt.Errorf.
+	var ae *AttemptErrors
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected *AttemptErrors, got %T: %v", err, err)
+	}
+	// context.Canceled must be reachable.
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is(err, context.Canceled), got %v", err)
+	}
+	// The operation error must also be reachable.
+	if !errors.Is(err, opErr) {
+		t.Errorf("expected errors.Is(err, opErr), got %v", err)
+	}
+}

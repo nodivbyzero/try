@@ -129,12 +129,7 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 		// call fn. This handles the case where ctx was cancelled before the first
 		// attempt, or was cancelled during the previous attempt's execution.
 		if ctx.Err() != nil {
-			ctxErr := fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
-			if cfg.AllErrors && len(allErrs) > 0 {
-				allErrs = append(allErrs, ctxErr)
-				return zero, &AttemptErrors{errs: allErrs}
-			}
-			return zero, ctxErr
+			return zero, cancelledErr(ctx, lastErr, cfg, allErrs)
 		}
 
 		// Wrap the parent context with a per-attempt deadline if configured.
@@ -191,7 +186,7 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 		// surfaces ctx.Err() correctly via Unwrap.
 		select {
 		case <-ctx.Done():
-			return zero, fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
+			return zero, cancelledErr(ctx, lastErr, cfg, allErrs)
 		case <-cfg.Clock.After(delay):
 			continue
 		}
@@ -238,6 +233,18 @@ func matchBudget(budgets []errorBudget, err error) *errorBudget {
 		}
 	}
 	return nil
+}
+
+// cancelledErr builds the error returned when the parent context is done.
+// When AllErrors is enabled it appends the context error to the accumulated
+// attempt errors so the full history — including the cancellation reason —
+// is reachable via errors.Is / errors.As on the returned *AttemptErrors.
+func cancelledErr(ctx context.Context, lastErr error, cfg *Config, allErrs []error) error {
+	ctxErr := fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
+	if cfg.AllErrors {
+		return &AttemptErrors{errs: append(allErrs, ctxErr)}
+	}
+	return ctxErr
 }
 
 func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
