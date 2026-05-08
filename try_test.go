@@ -888,3 +888,24 @@ func TestDo_WithAllErrors_ContextCancelReturnsAttemptErrors(t *testing.T) {
 		t.Errorf("expected errors.Is(err, opErr), got %v", err)
 	}
 }
+
+func TestDo_ContextCancelledBeforeFirstAttempt_NoNilSuffix(t *testing.T) {
+	// Regression: when ctx is cancelled before any attempt runs, lastErr is nil.
+	// The returned error must not contain "<nil>" in its message.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before Do is even called
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("should never run")
+	}, WithAttempts(3))
+
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+	if strings.Contains(err.Error(), "<nil>") {
+		t.Errorf("error message contains '<nil>': %q", err.Error())
+	}
+}

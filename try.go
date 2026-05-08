@@ -240,7 +240,14 @@ func matchBudget(budgets []errorBudget, err error) *errorBudget {
 // attempt errors so the full history — including the cancellation reason —
 // is reachable via errors.Is / errors.As on the returned *AttemptErrors.
 func cancelledErr(ctx context.Context, lastErr error, cfg *Config, allErrs []error) error {
-	ctxErr := fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
+	var ctxErr error
+	if lastErr != nil {
+		// Wrap both so errors.Is / errors.As can reach either.
+		ctxErr = fmt.Errorf("%w: last error: %w", ctx.Err(), lastErr)
+	} else {
+		// No attempt ran yet — omit the redundant "<nil>" suffix.
+		ctxErr = ctx.Err()
+	}
 	if cfg.AllErrors {
 		return &AttemptErrors{errs: append(allErrs, ctxErr)}
 	}
