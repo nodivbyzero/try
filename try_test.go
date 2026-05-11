@@ -781,8 +781,9 @@ func TestDo_WithDelayFunc_RetryAftererStillTakesPrecedence(t *testing.T) {
 	}
 }
 
-func TestDo_WithMaxJitter_CapsJitterWindow(t *testing.T) {
-	// With a large backoff cap but small MaxJitter, all delays must be <= MaxJitter.
+func TestDo_WithMaxJitter_FullJitter_CapsEntireDraw(t *testing.T) {
+	// FullJitter has no base delay, so MaxJitter caps the entire draw.
+	// All delays must be in [0, MaxJitter).
 	ctx := context.Background()
 	clk := &testClock{afterChan: make(chan time.Time, 20)}
 	for i := 0; i < 20; i++ {
@@ -796,8 +797,9 @@ func TestDo_WithMaxJitter_CapsJitterWindow(t *testing.T) {
 		return 0, errors.New("fail")
 	},
 		WithAttempts(6),
-		WithInitialDelay(10*time.Second), // large base — without MaxJitter delays could be huge
+		WithInitialDelay(10*time.Second),
 		WithMaxDelay(60*time.Second),
+		WithJitter(FullJitter),
 		WithMaxJitter(maxJitter),
 		WithClock(clk),
 		WithOnRetry(func(info RetryInfo) {
@@ -810,7 +812,45 @@ func TestDo_WithMaxJitter_CapsJitterWindow(t *testing.T) {
 	}
 	for i, d := range observedDelays {
 		if d > maxJitter {
-			t.Errorf("delay[%d] = %v, exceeds MaxJitter %v", i, d, maxJitter)
+			t.Errorf("delay[%d] = %v exceeds MaxJitter %v", i, d, maxJitter)
+		}
+	}
+}
+
+func TestDo_WithMaxJitter_EqualJitter_PreservesBase(t *testing.T) {
+	// EqualJitter base = cap/2. MaxJitter must cap only the random spread,
+	// not the base, so all delays must be >= cap/2.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 20)}
+	for i := 0; i < 20; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	const initial = 100 * time.Millisecond
+	const maxJitter = 10 * time.Millisecond
+	var observedDelays []time.Duration
+
+	_, _ = Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("fail")
+	},
+		WithAttempts(4),
+		WithInitialDelay(initial),
+		WithMaxDelay(initial), // keep cap fixed at initial for predictability
+		WithJitter(EqualJitter),
+		WithMaxJitter(maxJitter),
+		WithClock(clk),
+		WithOnRetry(func(info RetryInfo) {
+			observedDelays = append(observedDelays, info.Delay)
+		}),
+	)
+
+	base := initial / 2
+	for i, d := range observedDelays {
+		if d < base {
+			t.Errorf("delay[%d] = %v is below base %v — MaxJitter incorrectly reduced base", i, d, base)
+		}
+		if d > base+maxJitter {
+			t.Errorf("delay[%d] = %v exceeds base+MaxJitter %v", i, d, base+maxJitter)
 		}
 	}
 }

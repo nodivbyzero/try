@@ -73,9 +73,10 @@ type Config struct {
 	// When set, it is called instead of calculateNextDelay. RetryAfterer
 	// on the error is still respected before DelayFunc is consulted.
 	DelayFunc func(attempt int, err error) time.Duration
-	// MaxJitter caps the jitter window independently of the backoff cap.
+	// MaxJitter caps the random jitter spread independently of the backoff cap.
 	// Zero means no independent jitter cap — the full backoff cap is used
 	// as the jitter window (default behaviour).
+	// Values below 1ms are silently floored to 1ms to satisfy rand.Int64N.
 	MaxJitter time.Duration
 }
 
@@ -344,37 +345,47 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 		cap = cfg.MaxDelay
 	}
 
-	// 4. Apply MaxJitter cap: if set, the jitter window is the lesser of the
-	// computed exponential cap and MaxJitter. This allows long deterministic
-	// base delays with a small spread (e.g. 30s base ± 500ms jitter).
+	// 4. Compute the jitter window — distinct from the backoff cap.
+	// MaxJitter, if set, caps only the random spread while leaving the
+	// deterministic base delay intact (Option A semantics):
+	//   FullJitter:  rand[0, jitterWindow)             — base = 0
+	//   EqualJitter: cap/2 + rand[0, jitterWindow)     — base = cap/2
+	var jitterWindow time.Duration
 	if cfg.MaxJitter > 0 && cfg.MaxJitter < cap {
-		cap = cfg.MaxJitter
+		jitterWindow = cfg.MaxJitter
+	} else {
+		jitterWindow = cap // default: full backoff cap is the jitter window
 	}
 
-	// 5. Enforce the 1ms floor on the cap *before* passing it to Int64N.
-	// rand.Int64N(n) panics if n <= 0, which can happen when InitialDelay is
-	// very small (e.g. 1ns) and the computed cap rounds down to zero or below
-	// the minimum meaningful range. Clamping here is safe: if cap < 1ms the
-	// result would have been floored to 1ms anyway.
-	if cap < time.Millisecond {
-		cap = time.Millisecond
+	// 5. Enforce the 1ms floor on the jitter window *before* passing it to
+	// Int64N. rand.Int64N(n) panics if n <= 0.
+	if jitterWindow < time.Millisecond {
+		jitterWindow = time.Millisecond
 	}
 
 	// 6. Apply jitter strategy.
 	var d time.Duration
 	switch cfg.Jitter {
 	case EqualJitter:
-		// Equal Jitter: cap/2 + rand[0, cap/2)
-		// Guarantees at least half the exponential backoff, reducing the chance
-		// of very short delays while still spreading retriers over time.
-		// After the floor above, cap >= 1ms so half >= 500µs > 0 — no panic risk.
-		half := cap / 2
-		d = half + time.Duration(rand.Int64N(int64(half)))
+		// Equal Jitter: cap/2 + rand[0, jitterWindow)
+		// Base delay is cap/2 (deterministic); MaxJitter caps only the random
+		// spread so the base is preserved even when MaxJitter is small.
+		base := cap / 2
+		if base < time.Millisecond {
+			base = time.Millisecond
+		}
+		d = base + time.Duration(rand.Int64N(int64(jitterWindow)))
 	default: // FullJitter
-		// Full Jitter: rand[0, cap)
-		// Minimises correlated retries at the cost of potentially short waits.
-		// cap >= 1ms after the floor above — no panic risk.
-		d = time.Duration(rand.Int64N(int64(cap)))
+		// Full Jitter: rand[0, jitterWindow)
+		// No deterministic base; MaxJitter caps the entire draw.
+		d = time.Duration(rand.Int64N(int64(jitterWindow)))
+	}
+
+	// 7. Enforce MaxDelay as the hard ceiling on the final delay.
+	// EqualJitter's base + jitter can slightly exceed MaxDelay when cap is
+	// close to MaxDelay. Cap here rather than constraining the components.
+	if cfg.MaxDelay > 0 && d > cfg.MaxDelay {
+		d = cfg.MaxDelay
 	}
 
 	return d
