@@ -1057,3 +1057,102 @@ func TestSanitize_NegativeAttemptTimeout_Disabled(t *testing.T) {
 		t.Errorf("expected ok, got %s", val)
 	}
 }
+
+func TestDo_MaxErrorHistory_KeepsLastN(t *testing.T) {
+	// With MaxErrorHistory(3) and 6 attempts, only the last 3 errors are kept.
+	ctx := context.Background()
+	clk := &testClock{afterChan: make(chan time.Time, 10)}
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+
+	var errs [6]error
+	for i := range errs {
+		errs[i] = fmt.Errorf("attempt %d error", i+1)
+	}
+	call := 0
+
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		e := errs[call]
+		call++
+		return 0, e
+	},
+		WithAttempts(6),
+		WithAllErrors(),
+		WithMaxErrorHistory(3),
+		WithClock(clk),
+	)
+
+	var ae *AttemptErrors
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected *AttemptErrors, got %T", err)
+	}
+	unwrapped := ae.Unwrap()
+	if len(unwrapped) != 3 {
+		t.Fatalf("expected 3 errors in history, got %d", len(unwrapped))
+	}
+	// Must be the last 3 errors (attempts 4, 5, 6), not the first 3.
+	for i, want := range errs[3:] {
+		if !errors.Is(unwrapped[i], want) {
+			t.Errorf("history[%d]: expected %v, got %v", i, want, unwrapped[i])
+		}
+	}
+}
+
+func TestDo_MaxErrorHistory_InfiniteRetry_Bounded(t *testing.T) {
+	// WithInfiniteRetry + WithMaxErrorHistory must not grow beyond the cap.
+	ctx, cancel := context.WithCancel(context.Background())
+	clk := &testClock{afterChan: make(chan time.Time)}
+	attempts := 0
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Do(ctx, func(ctx context.Context) (int, error) {
+			attempts++
+			return 0, fmt.Errorf("fail %d", attempts)
+		},
+			WithInfiniteRetry(),
+			WithAllErrors(),
+			WithMaxErrorHistory(5),
+			WithClock(clk),
+		)
+		done <- err
+	}()
+
+	// Drive several retries manually then cancel.
+	for i := 0; i < 10; i++ {
+		clk.afterChan <- time.Now()
+	}
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	err := <-done
+	var ae *AttemptErrors
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected *AttemptErrors, got %T", err)
+	}
+	// History must never exceed the cap.
+	if len(ae.Unwrap()) > 6 { // 5 attempt errors + 1 context error
+		t.Errorf("history length %d exceeds cap 5 (+1 ctx)", len(ae.Unwrap()))
+	}
+}
+
+func TestAppendErrHistory_RingEviction(t *testing.T) {
+	// Unit test for the ring-buffer eviction logic directly.
+	e1, e2, e3, e4 := errors.New("e1"), errors.New("e2"), errors.New("e3"), errors.New("e4")
+
+	buf := appendErrHistory(nil, e1, 3)
+	buf = appendErrHistory(buf, e2, 3)
+	buf = appendErrHistory(buf, e3, 3) // full: [e1, e2, e3]
+	buf = appendErrHistory(buf, e4, 3) // evicts e1: [e2, e3, e4]
+
+	if len(buf) != 3 {
+		t.Fatalf("expected len 3, got %d", len(buf))
+	}
+	if buf[0] != e2 || buf[1] != e3 || buf[2] != e4 {
+		t.Errorf("unexpected ring contents: %v", buf)
+	}
+	if errors.Is(&AttemptErrors{errs: buf}, e1) {
+		t.Error("e1 should have been evicted")
+	}
+}

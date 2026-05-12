@@ -69,6 +69,11 @@ type Config struct {
 	// attempt error and returns them joined via errors.Join so that
 	// errors.Is / errors.As can inspect the full history.
 	AllErrors bool
+	// MaxErrorHistory caps the number of errors retained when AllErrors is set.
+	// Zero means unlimited (safe for bounded MaxAttempts, risky with
+	// WithInfiniteRetry). When the cap is reached the oldest error is discarded
+	// and the newest is appended, so the most recent failures are always kept.
+	MaxErrorHistory int
 	// DelayFunc overrides the built-in backoff algorithm entirely.
 	// When set, it is called instead of calculateNextDelay. RetryAfterer
 	// on the error is still respected before DelayFunc is consulted.
@@ -151,6 +156,10 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 	// infinite is true when MaxAttempts == 0: retry until success or context
 	// cancellation. Otherwise the loop runs for exactly MaxAttempts iterations.
 	infinite := cfg.MaxAttempts == 0
+	if cfg.AllErrors && !infinite && cfg.MaxErrorHistory == 0 {
+		// Pre-allocate for bounded runs to avoid repeated reallocations.
+		allErrs = make([]error, 0, cfg.MaxAttempts)
+	}
 	for attempt := 1; infinite || attempt <= cfg.MaxAttempts; attempt++ {
 		// Bail immediately if the parent context is already done before we even
 		// call fn. This handles the case where ctx was cancelled before the first
@@ -180,7 +189,7 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 
 		lastErr = err
 		if cfg.AllErrors {
-			allErrs = append(allErrs, err)
+			allErrs = appendErrHistory(allErrs, err, cfg.MaxErrorHistory)
 		}
 
 		if !shouldRetry(ctx, cfg, err) {
@@ -262,6 +271,21 @@ func matchBudgetIndex(budgets []errorBudget, err error) int {
 		}
 	}
 	return -1
+}
+
+// appendErrHistory appends err to errs, evicting the oldest entry when cap > 0
+// and the slice is full. A cap of 0 means unlimited growth.
+func appendErrHistory(errs []error, err error, cap int) []error {
+	if cap <= 0 {
+		return append(errs, err)
+	}
+	if len(errs) < cap {
+		return append(errs, err)
+	}
+	// Ring-buffer eviction: shift left and place new error at the end.
+	copy(errs, errs[1:])
+	errs[len(errs)-1] = err
+	return errs
 }
 
 // cancelledErr builds the error returned when the parent context is done.

@@ -109,6 +109,20 @@
 //	// errors.Is still works across the full history:
 //	if errors.Is(err, ErrRateLimit) { ... }
 //
+// When combining [WithAllErrors] with [WithInfiniteRetry], use
+// [WithMaxErrorHistory] to cap the retained errors via a ring buffer.
+// Without it, the error slice grows unboundedly until context cancellation,
+// risking OOM in long-running services:
+//
+//	try.Do(ctx, fn,
+//	    try.WithInfiniteRetry(),
+//	    try.WithAllErrors(),
+//	    try.WithMaxErrorHistory(50), // retain only the last 50 errors
+//	)
+//
+// For bounded [WithAttempts] runs the slice is pre-allocated to the exact
+// attempt count — no reallocation occurs even without a cap.
+//
 // # Per-attempt timeout
 //
 // [WithTimeout] sets a deadline on each individual call to fn, independent of

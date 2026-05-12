@@ -111,3 +111,25 @@ func WithDelayFunc(fn func(attempt int, err error) time.Duration) Option {
 func WithMaxJitter(d time.Duration) Option {
 	return func(c *Config) { c.MaxJitter = d }
 }
+
+// WithMaxErrorHistory caps the number of errors retained when [WithAllErrors]
+// is set. When the cap is reached the oldest error is evicted and the newest
+// appended, so the most recent failures are always available.
+//
+// This is strongly recommended when combining [WithInfiniteRetry] and
+// [WithAllErrors] to prevent unbounded memory growth:
+//
+//	try.Do(ctx, fn,
+//	    try.WithInfiniteRetry(),
+//	    try.WithAllErrors(),
+//	    try.WithMaxErrorHistory(50),
+//	)
+//
+// Zero (the default) means unlimited history, which is safe for bounded
+// [WithAttempts] runs but will cause unbounded growth with infinite retry.
+func WithMaxErrorHistory(n int) Option {
+	if n < 0 {
+		n = 0
+	}
+	return func(c *Config) { c.MaxErrorHistory = n }
+}

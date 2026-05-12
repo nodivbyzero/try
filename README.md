@@ -11,6 +11,7 @@ A small, generic Go library for retrying fallible operations with exponential ba
 - **Per-error budgets** — `WithAttemptsForError(n, err)` caps retries for a specific error independently of the global limit
 - **Per-attempt timeout** — `WithTimeout(d)` cancels a single slow attempt without affecting the overall retry budget
 - **Error aggregation** — `WithAllErrors()` collects every attempt error; inspect the full history via `errors.Is` / `errors.As`
+- **Bounded error history** — `WithMaxErrorHistory(n)` caps the retained errors via a ring buffer; essential when combining `WithInfiniteRetry` and `WithAllErrors`
 - **Custom delay function** — `WithDelayFunc` replaces the built-in backoff with any schedule: fixed, linear, or error-dependent
 - **Jitter window cap** — `WithMaxJitter(d)` constrains spread independently of the backoff cap
 - **`RetryAfterer` interface** — errors can specify their own wait duration (e.g. HTTP 429)
@@ -78,6 +79,7 @@ Each option is a functional setter for a field on `Config`:
 | `WithAttemptsForError(n int, err error)` | `ErrorBudgets` | — | Cap retries for a specific error; multiple calls accumulate |
 | `WithTimeout(d time.Duration)` | `AttemptTimeout` | disabled | Per-attempt deadline; cancelled attempts are retried |
 | `WithAllErrors()` | `AllErrors` | false | Aggregate all attempt errors into `*AttemptErrors` |
+| `WithMaxErrorHistory(n int)` | `MaxErrorHistory` | unlimited | Cap retained errors to last `n`; ring-buffer evicts oldest first |
 | `WithOnRetry(fn func(RetryInfo))` | `OnRetry` | nil | Callback fired before each wait — use for logging or metrics |
 | `WithClock(clk Clock)` | `Clock` | `time.After` | Injectable clock for time-travel in tests |
 
@@ -232,6 +234,23 @@ if errors.Is(err, ErrRateLimit) {
 
 `WithAllErrors` is opt-in — the default behaviour (last error only) is
 unchanged and has no allocation overhead.
+
+### Bounding history with `WithMaxErrorHistory`
+
+When combining `WithAllErrors` with `WithInfiniteRetry`, `allErrs` grows
+indefinitely until context cancellation. Use `WithMaxErrorHistory(n)` to cap
+it to the last `n` errors via a ring buffer — oldest errors are evicted first:
+
+```go
+try.Do(ctx, fn,
+    try.WithInfiniteRetry(),
+    try.WithAllErrors(),
+    try.WithMaxErrorHistory(50), // retain only the last 50 errors
+)
+```
+
+For bounded `WithAttempts` runs the history is pre-allocated to the exact
+attempt count, so no reallocation occurs even without a cap.
 
 ## Per-Attempt Timeout
 
