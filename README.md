@@ -1,4 +1,9 @@
-# try
+try
+================
+
+[![Go Documentation](http://img.shields.io/badge/go-documentation-blue.svg?style=flat-square)][godocs]
+
+[godocs]: https://pkg.go.dev/github.com/nodivbyzero/try
 
 A small, generic Go library for retrying fallible operations with exponential backoff and pluggable jitter strategies.
 
