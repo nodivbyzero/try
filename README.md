@@ -5,11 +5,14 @@ try
 
 [godocs]: https://pkg.go.dev/github.com/nodivbyzero/try
 
+Full API docs: [pkg.go.dev/github.com/nodivbyzero/try](https://pkg.go.dev/github.com/nodivbyzero/try/)
+
 A small, generic Go library for retrying fallible operations with exponential backoff and pluggable jitter strategies.
 
 ## Features
 
 - **Generic** — works with any return type via `Do[T]`
+- **Reusable client** — `try.New(opts...)` returns a `*Try` that holds default options across many call sites, with per-call overrides via its generic `Do` method
 - **Exponential backoff** with pluggable jitter — Full Jitter (default) or Equal Jitter
 - **`Permanent` errors** — stop retrying immediately for non-recoverable failures
 - **`IsPermanent(err)`** — inspect whether an error originated from a permanent failure
@@ -27,6 +30,11 @@ A small, generic Go library for retrying fallible operations with exponential ba
 
 ## Installation
 
+> **Requires Go 1.27+.** The `Try` client's `Do` method is a generic method
+> on a concrete type, a language feature added in Go 1.27. If you're on an
+> older toolchain, pin to the last `v1.0.x` release, which has no minimum
+> beyond what it already required.
+
 ```bash
 go get github.com/nodivbyzero/try
 ```
@@ -40,6 +48,53 @@ val, err := try.Do(ctx, func(ctx context.Context) (string, error) {
 ```
 
 `Do` retries up to 5 times by default, with exponential backoff capped at 30 seconds.
+
+## Reusable Client
+
+The package-level `Do` function is stateless — every call needs its own list
+of options. If you're calling `try.Do` from many places with the same retry
+policy, `try.New` returns a `*Try` client that holds a set of default options
+once, so you don't have to repeat them at every call site:
+
+```go
+type UserService struct {
+    retry *try.Try
+}
+
+func NewUserService() *UserService {
+    return &UserService{
+        retry: try.New(
+            try.WithAttempts(3),
+            try.WithInitialDelay(100*time.Millisecond),
+            try.WithRetryIf(isTransient),
+        ),
+    }
+}
+
+func (s *UserService) FetchUser(ctx context.Context, id int) (*User, error) {
+    return s.retry.Do(ctx, func(ctx context.Context) (*User, error) {
+        return db.FindUser(ctx, id)
+    })
+}
+```
+
+Options passed to a given `Do` call are applied *after* the client's
+defaults, so they override matching fields (last-applied-wins) without
+disturbing the rest of the shared configuration:
+
+```go
+client := try.New(try.WithAttempts(3))
+
+// Uses the client's default of 3 attempts.
+client.Do(ctx, fetchUser)
+
+// Overrides just this call to 10 attempts; other defaults still apply.
+client.Do(ctx, fetchUser, try.WithAttempts(10))
+```
+
+`Do`'s type parameter is inferred independently at each call site, so a
+single `*Try` can be reused across calls returning different types. A `*Try`
+never mutates its stored defaults, so it's safe to share across goroutines.
 
 > **Default retry behaviour:** `Do` retries on *every* error except `context.Canceled`,
 > `context.DeadlineExceeded`, and errors wrapped with [`Permanent`](#stopping-immediately-permanent).
@@ -352,6 +407,7 @@ and render on [pkg.go.dev](https://pkg.go.dev/github.com/nodivbyzero/try). They 
 - `ExampleDo_onRetry` — structured logging via `WithOnRetry`
 - `ExampleDo_retryAfter` — honouring `RetryAfterer` on rate-limit errors
 - `ExampleDo_equalJitter` — `EqualJitter` with `WithMaxDelay`
+- `ExampleTry_Do` — a service struct sharing retry defaults via `try.New`
 - `ExamplePermanent` — `errors.Is` through the `Permanent` wrapper
 
 ## Testing

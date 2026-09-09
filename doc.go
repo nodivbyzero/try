@@ -37,6 +37,43 @@
 // to be taken. The callback is not called on the final attempt since no retry
 // will follow. Use it for structured logging, metrics, or tracing.
 //
+// # Reusable client
+//
+// Do is stateless: every call needs its own list of options. [New] returns a
+// [Try] client that holds a set of default options once, so callers with
+// many call sites sharing the same retry policy don't have to repeat those
+// options everywhere:
+//
+//	type UserService struct {
+//	    retry *try.Try
+//	}
+//
+//	func NewUserService() *UserService {
+//	    return &UserService{
+//	        retry: try.New(
+//	            try.WithAttempts(3),
+//	            try.WithInitialDelay(100*time.Millisecond),
+//	            try.WithRetryIf(isTransient),
+//	        ),
+//	    }
+//	}
+//
+//	func (s *UserService) FetchUser(ctx context.Context, id int) (*User, error) {
+//	    return s.retry.Do(ctx, func(ctx context.Context) (*User, error) {
+//	        return db.FindUser(ctx, id)
+//	    })
+//	}
+//
+// Options passed to a given [Try.Do] call are applied after the client's
+// defaults, so they override matching fields (last-applied-wins) without
+// disturbing the rest of the shared configuration. [Try.Do]'s type parameter
+// is inferred independently at each call site, so a single [Try] can back
+// calls returning different types. A [Try] never mutates its stored
+// defaults, so it's safe to share across goroutines.
+//
+// [Try.Do] declares its own type parameter, a language feature ([generic
+// methods]) added in Go 1.27; see the go.mod minimum version.
+//
 // # Default retry behaviour
 //
 // By default Do retries on every error except [context.Canceled],
@@ -191,4 +228,6 @@
 //
 // Inject a custom [Clock] via [WithClock] to control time in unit tests
 // without real sleeps.
+//
+// [generic methods]: https://go.dev/doc/go1.27
 package try

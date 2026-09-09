@@ -286,6 +286,46 @@ func ExampleIsPermanent() {
 	// false
 }
 
+// UserService holds a *try.Try configured once, at construction, with the
+// retry policy every method should share. Individual methods can still
+// layer on per-call options — see Do below — without repeating the shared
+// defaults at every call site.
+type UserService struct {
+	retry *try.Try
+}
+
+func NewUserService() *UserService {
+	return &UserService{
+		retry: try.New(
+			try.WithAttempts(3),
+			try.WithInitialDelay(time.Millisecond),
+			try.WithRetryIf(func(err error) bool {
+				return err.Error() == "unavailable"
+			}),
+		),
+	}
+}
+
+func (s *UserService) FetchUser(ctx context.Context, id int) (string, error) {
+	return s.retry.Do(ctx, func(ctx context.Context) (string, error) {
+		return fmt.Sprintf("user-%d", id), nil
+	})
+}
+
+// ExampleTry_Do shows the reusable-client pattern: a service configures its
+// retry policy once via try.New, then calls Do per method. Per-call options
+// passed to Do are applied after the client's defaults, so they override
+// matching fields (last-applied-wins) without disturbing the rest of the
+// shared configuration.
+func ExampleTry_Do() {
+	svc := NewUserService()
+
+	val, err := svc.FetchUser(context.Background(), 42)
+	fmt.Println(val, err)
+	// Output:
+	// user-42 <nil>
+}
+
 // ExamplePermanent shows that Permanent unwraps cleanly, so the original
 // error remains inspectable via errors.Is after the loop exits.
 func ExamplePermanent() {
