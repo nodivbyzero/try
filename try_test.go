@@ -78,6 +78,24 @@ func TestDo_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestDo_DoesNotSleepPastContextDeadline(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(100*time.Millisecond))
+	defer cancel()
+
+	started := time.Now()
+	_, err := Do(ctx, func(ctx context.Context) (int, error) {
+		return 0, errors.New("temporary")
+	}, WithAttempts(2), WithDelayFunc(func(int, error) time.Duration {
+		return time.Hour
+	}))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("deadline check took too long: %s", elapsed)
+	}
+}
+
 type retryAfterError struct{ d time.Duration }
 
 func (e retryAfterError) Error() string             { return "retry after" }
@@ -97,9 +115,9 @@ func TestDo_RetryAfter(t *testing.T) {
 	}()
 
 	<-errTriggered
-	// At this point, the library is sitting in the 'select' block 
+	// At this point, the library is sitting in the 'select' block
 	// waiting for the 10 hour duration.
-	
+
 	select {
 	case clk.afterChan <- time.Now():
 		// Success: the library accepted our manual tick
@@ -110,7 +128,7 @@ func TestDo_RetryAfter(t *testing.T) {
 
 func TestDo_Generics(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Test with a struct
 	type User struct{ ID int }
 	val, _ := Do(ctx, func(ctx context.Context) (User, error) {
@@ -284,6 +302,34 @@ func TestDo_LargeInitialDelay_NoPanic(t *testing.T) {
 	for _, info := range infos {
 		if info.Delay > maxDelay {
 			t.Errorf("attempt %d: delay %v exceeded MaxDelay %v", info.Attempt, info.Delay, maxDelay)
+		}
+	}
+}
+
+func TestDo_JitterAtMaxDuration_NoOverflow(t *testing.T) {
+	// An uncapped exponential can reach the largest representable duration.
+	// Neither jitter strategy may panic or wrap the resulting delay negative.
+	for _, strategy := range []JitterStrategy{FullJitter, EqualJitter} {
+		ctx := context.Background()
+		clk := &testClock{afterChan: make(chan time.Time, 2)}
+		clk.afterChan <- time.Now()
+
+		var observed time.Duration
+		_, err := Do(ctx, func(ctx context.Context) (int, error) {
+			return 0, errors.New("fail")
+		},
+			WithAttempts(2),
+			WithInitialDelay(maxDuration),
+			WithMaxDelay(maxDuration),
+			WithJitter(strategy),
+			WithClock(clk),
+			WithOnRetry(func(info RetryInfo) { observed = info.Delay }),
+		)
+		if err == nil {
+			t.Fatal("expected final error")
+		}
+		if observed < 0 || observed > maxDuration {
+			t.Fatalf("strategy %v produced invalid delay %d", strategy, observed)
 		}
 	}
 }

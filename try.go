@@ -41,9 +41,9 @@ const (
 
 // RetryInfo carries context about a failed attempt, passed to the OnRetry callback.
 type RetryInfo struct {
-	Attempt   int           // 1-based attempt number that just failed
-	Err       error         // error returned by the attempt
-	Delay     time.Duration // how long Do will wait before the next attempt
+	Attempt int           // 1-based attempt number that just failed
+	Err     error         // error returned by the attempt
+	Delay   time.Duration // how long Do will wait before the next attempt
 }
 
 // Config holds the internal state for the retry operation.
@@ -84,6 +84,8 @@ type Config struct {
 	// Values below 1ms are silently floored to 1ms to satisfy rand.Int64N.
 	MaxJitter time.Duration
 }
+
+const maxDuration = time.Duration(1<<63 - 1)
 
 // AttemptErrors is the joined error type returned when WithAllErrors is set.
 // It implements Unwrap() []error for Go 1.20+ multi-error unwrapping, so
@@ -135,10 +137,10 @@ func sanitize(cfg *Config) {
 // function is called at most 5 times. Set MaxAttempts to 0 for infinite retry.
 func defaultConfig() *Config {
 	return &Config{
-		MaxAttempts: 5,
+		MaxAttempts:  5,
 		InitialDelay: 200 * time.Millisecond,
-		MaxDelay:    30 * time.Second,
-		Clock:       realClock{},
+		MaxDelay:     30 * time.Second,
+		Clock:        realClock{},
 	}
 }
 
@@ -213,6 +215,14 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 		// Not called on the final attempt of a bounded run since no retry follows.
 		if cfg.OnRetry != nil {
 			cfg.OnRetry(RetryInfo{Attempt: attempt, Err: err, Delay: delay})
+		}
+
+		// Do not enter a backoff that cannot finish before the parent context's
+		// deadline. Waiting for the context cancellation signal would produce
+		// the same result, but could waste the entire remaining deadline while
+		// no further attempt can possibly start.
+		if deadline, ok := ctx.Deadline(); ok && !deadline.After(cfg.Clock.Now().Add(delay)) {
+			return zero, deadlineExceededErr(ctx, lastErr, cfg, allErrs)
 		}
 
 		// Wait for either the delay or context cancellation.
@@ -307,6 +317,19 @@ func cancelledErr(ctx context.Context, lastErr error, cfg *Config, allErrs []err
 	return ctxErr
 }
 
+func deadlineExceededErr(ctx context.Context, lastErr error, cfg *Config, allErrs []error) error {
+	var deadlineErr error
+	if lastErr != nil {
+		deadlineErr = fmt.Errorf("%w: last error: %w", context.DeadlineExceeded, lastErr)
+	} else {
+		deadlineErr = context.DeadlineExceeded
+	}
+	if cfg.AllErrors {
+		return &AttemptErrors{errs: append(allErrs, deadlineErr)}
+	}
+	return deadlineErr
+}
+
 func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
 	// Stop if the parent context is done — check ctx.Err() rather than the
 	// error value so that per-attempt timeouts (a child context) are not
@@ -397,6 +420,11 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 		base := cap / 2
 		if base < time.Millisecond {
 			base = time.Millisecond
+		}
+		// Keep the addition below within time.Duration's int64 range when cap
+		// and jitterWindow are both near MaxInt64.
+		if room := maxDuration - base; jitterWindow > room {
+			jitterWindow = room
 		}
 		d = base + time.Duration(rand.Int64N(int64(jitterWindow)))
 	default: // FullJitter

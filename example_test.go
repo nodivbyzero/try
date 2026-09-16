@@ -182,7 +182,7 @@ func ExampleDo_allErrors() {
 	)
 
 	var ae *try.AttemptErrors
-	fmt.Println(errors.As(err, &ae))   // *AttemptErrors accessible
+	fmt.Println(errors.As(err, &ae))      // *AttemptErrors accessible
 	fmt.Println(errors.Is(err, sentinel)) // sentinel reachable anywhere in history
 	// Output:
 	// true
@@ -234,8 +234,8 @@ func ExampleDo_attemptsForError() {
 		calls++
 		return 0, ErrRateLimit
 	},
-		try.WithAttempts(10),                       // global budget: 10
-		try.WithAttemptsForError(2, ErrRateLimit),  // but stop after 2 rate-limit hits
+		try.WithAttempts(10),                      // global budget: 10
+		try.WithAttemptsForError(2, ErrRateLimit), // but stop after 2 rate-limit hits
 		try.WithInitialDelay(time.Millisecond),
 	)
 
