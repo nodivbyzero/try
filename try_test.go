@@ -101,6 +101,13 @@ type retryAfterError struct{ d time.Duration }
 func (e retryAfterError) Error() string             { return "retry after" }
 func (e retryAfterError) RetryAfter() time.Duration { return e.d }
 
+type wrappedRetryAfterError struct {
+	retryAfterError
+	err error
+}
+
+func (e wrappedRetryAfterError) Unwrap() error { return e.err }
+
 func TestDo_RetryAfter(t *testing.T) {
 	ctx := context.Background()
 	clk := &testClock{afterChan: make(chan time.Time)}
@@ -123,6 +130,65 @@ func TestDo_RetryAfter(t *testing.T) {
 		// Success: the library accepted our manual tick
 	case <-time.After(1 * time.Second):
 		t.Fatal("library did not respect retry-after or clock")
+	}
+}
+
+func TestDo_RetryAfterWrapped(t *testing.T) {
+	const requestedDelay = 20 * time.Millisecond
+	const maxDelay = 50 * time.Millisecond
+	const fallbackDelay = time.Millisecond
+	raErr := retryAfterError{d: requestedDelay}
+	cappedErr := retryAfterError{d: time.Hour}
+	unrelatedErr := errors.New("unrelated failure")
+
+	tests := []struct {
+		name string
+		err  error
+		want time.Duration
+	}{
+		{"direct", raErr, requestedDelay},
+		{"outer retry after", wrappedRetryAfterError{retryAfterError{d: maxDelay}, raErr}, maxDelay},
+		{"wrapped", fmt.Errorf("request failed: %w", raErr), requestedDelay},
+		{"nested", fmt.Errorf("operation failed: %w", fmt.Errorf("request failed: %w", raErr)), requestedDelay},
+		{"joined", errors.Join(unrelatedErr, raErr), requestedDelay},
+		{"wrapped capped", fmt.Errorf("request failed: %w", cappedErr), maxDelay},
+		{"joined capped", errors.Join(unrelatedErr, cappedErr), maxDelay},
+		{"no retry after", fmt.Errorf("request failed: %w", unrelatedErr), fallbackDelay},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clk := &testClock{afterChan: make(chan time.Time, 1)}
+			clk.afterChan <- time.Now()
+			var observedDelay time.Duration
+			calls := 0
+			fallbackCalls := 0
+			val, err := Do(context.Background(), func(context.Context) (string, error) {
+				calls++
+				if calls == 1 {
+					return "", tt.err
+				}
+				return "ok", nil
+			}, WithAttempts(2), WithClock(clk), WithMaxDelay(maxDelay),
+				WithDelayFunc(func(int, error) time.Duration {
+					fallbackCalls++
+					return fallbackDelay
+				}),
+				WithOnRetry(func(info RetryInfo) { observedDelay = info.Delay }),
+			)
+			if err != nil || val != "ok" || calls != 2 {
+				t.Fatalf("Do returned (%q, %v) after %d calls", val, err, calls)
+			}
+			if observedDelay != tt.want {
+				t.Errorf("retry delay = %v, want %v", observedDelay, tt.want)
+			}
+			wantFallbackCalls := 0
+			if tt.want == fallbackDelay {
+				wantFallbackCalls = 1
+			}
+			if fallbackCalls != wantFallbackCalls {
+				t.Errorf("delay function called %d times, want %d", fallbackCalls, wantFallbackCalls)
+			}
+		})
 	}
 }
 

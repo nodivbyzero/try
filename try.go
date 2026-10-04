@@ -356,7 +356,8 @@ func shouldRetry(ctx context.Context, cfg *Config, err error) bool {
 
 func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 	// 1. Check for Retry-After override — takes precedence over everything.
-	if ra, ok := err.(RetryAfterer); ok {
+	var ra RetryAfterer
+	if errors.As(err, &ra) {
 		d := ra.RetryAfter()
 		if d > cfg.MaxDelay {
 			return cfg.MaxDelay
