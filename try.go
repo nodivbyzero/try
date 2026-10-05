@@ -396,13 +396,18 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 	// 4. Compute the jitter window — distinct from the backoff cap.
 	// MaxJitter, if set, caps only the random spread while leaving the
 	// deterministic base delay intact (Option A semantics):
-	//   FullJitter:  rand[0, jitterWindow)             — base = 0
-	//   EqualJitter: cap/2 + rand[0, jitterWindow)     — base = cap/2
-	var jitterWindow time.Duration
-	if cfg.MaxJitter > 0 && cfg.MaxJitter < cap {
+	//   FullJitter:  rand[0, jitterWindow)             — base = 0,     window <= cap
+	//   EqualJitter: cap/2 + rand[0, jitterWindow)     — base = cap/2, window <= cap - cap/2
+	//
+	// For EqualJitter the default window is the remaining half of the cap, so
+	// the delay stays within [cap/2, cap) as documented instead of reaching
+	// up to 1.5x the exponential cap.
+	jitterWindow := cap
+	if cfg.Jitter == EqualJitter {
+		jitterWindow = cap - cap/2
+	}
+	if cfg.MaxJitter > 0 && cfg.MaxJitter < jitterWindow {
 		jitterWindow = cfg.MaxJitter
-	} else {
-		jitterWindow = cap // default: full backoff cap is the jitter window
 	}
 
 	// 5. Enforce the 1ms floor on the jitter window *before* passing it to
@@ -435,8 +440,8 @@ func calculateNextDelay(cfg *Config, attempt int, err error) time.Duration {
 	}
 
 	// 7. Enforce MaxDelay as the hard ceiling on the final delay.
-	// EqualJitter's base + jitter can slightly exceed MaxDelay when cap is
-	// close to MaxDelay. Cap here rather than constraining the components.
+	// The 1ms floors above can push a tiny delay past a sub-millisecond
+	// MaxDelay. Cap here rather than constraining the components.
 	if cfg.MaxDelay > 0 && d > cfg.MaxDelay {
 		d = cfg.MaxDelay
 	}

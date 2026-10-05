@@ -1268,3 +1268,37 @@ func TestAppendErrHistory_RingEviction(t *testing.T) {
 		t.Error("e1 should have been evicted")
 	}
 }
+
+func TestDo_EqualJitter_StaysWithinCap(t *testing.T) {
+	// EqualJitter is documented as cap/2 + rand[0, cap/2): every delay must be
+	// at least half the exponential cap and strictly below the cap itself,
+	// even while the cap is still below MaxDelay.
+	const initial = 100 * time.Millisecond
+	const attempts = 4
+
+	for run := 0; run < 200; run++ {
+		clk := &testClock{afterChan: make(chan time.Time, attempts)}
+		for i := 0; i < attempts; i++ {
+			clk.afterChan <- time.Now()
+		}
+
+		var infos []RetryInfo
+		_, _ = Do(context.Background(), func(ctx context.Context) (int, error) {
+			return 0, errors.New("fail")
+		},
+			WithAttempts(attempts),
+			WithInitialDelay(initial),
+			WithMaxDelay(time.Hour),
+			WithJitter(EqualJitter),
+			WithClock(clk),
+			WithOnRetry(func(info RetryInfo) { infos = append(infos, info) }),
+		)
+
+		for _, info := range infos {
+			capDelay := initial << (info.Attempt - 1)
+			if info.Delay < capDelay/2 || info.Delay >= capDelay {
+				t.Fatalf("attempt %d: delay %v outside [%v, %v)", info.Attempt, info.Delay, capDelay/2, capDelay)
+			}
+		}
+	}
+}
